@@ -275,40 +275,84 @@ init_data()
 ```
 
 ═══════════════════════════════════════════════════════════════════════════════
-FRONTEND-BACKEND CONNECTION (CRITICAL!)
+FRONTEND-BACKEND CONNECTION (CRITICAL - READ EVERY LINE!)
 ═══════════════════════════════════════════════════════════════════════════════
-When generating frontend files (HTML/JS) that need to call backend APIs:
+The frontend and backend run on COMPLETELY SEPARATE domains (not localhost!).
+The backend URL is injected at deploy time. You MUST use a variable, NEVER a hardcoded URL.
 
-- **API BASE URL**: Frontend must call backend at `http://127.0.0.1:8000`
-  * Both frontend and backend run in the SAME sandbox (not separate servers)
-  * DO NOT use window.location.origin or relative URLs for API calls
-  * Example: `fetch('http://127.0.0.1:8000/api/posts')`
-  
-- **ENDPOINT CONSISTENCY**: Ensure frontend calls match backend routes exactly
-  * If backend has `/api/posts`, frontend must call `/api/posts` (not `/posts`)
-  * If backend has `/login`, frontend must call `/login` (not `/auth/login`)
+⚠️  ABSOLUTE RULES (violating ANY of these will break the app):
+  1. NEVER write `http://localhost:8000` or `http://127.0.0.1:8000` ANYWHERE in frontend code
+  2. NEVER write `http://localhost:5000` or ANY `http://localhost:XXXX` in frontend code
+  3. NEVER write `http://0.0.0.0:8000` in frontend code
+  4. ALWAYS define API_BASE_URL as a variable at the TOP of EVERY file that makes API calls
+  5. ALWAYS use that variable for ALL fetch/axios/XMLHttpRequest calls
 
-- **ERROR HANDLING**: Add try-catch blocks and show user-friendly errors
+- **For plain HTML/JS (MOST COMMON)**: 
+  ```const API_BASE_URL = window.__API_BASE_URL__ || '';```
+  Then use: `fetch(API_BASE_URL + '/api/posts')`
+  The empty string fallback means relative URLs (works when same-origin).
+
+- **For Next.js/React**: 
+  ```const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';```
+
+- **For Vite**: 
+  ```const API_BASE_URL = import.meta.env.VITE_API_URL || '';```
+
+- **ENDPOINT CONSISTENCY**: Frontend calls must match backend routes exactly
+  * If backend has `/api/posts`, frontend must call `API_BASE_URL + '/api/posts'`
+  * If backend has `/login`, frontend must call `API_BASE_URL + '/login'`
+
+- **ERROR HANDLING**: Add try-catch and user-friendly errors
   * Check response.ok before parsing JSON
-  * Display error messages in UI (not just console.log)
+  * Display errors in UI (not just console.log)
 
-FRONTEND API CALL EXAMPLE:
+- **CORS**: The backend MUST include CORS headers since frontend and backend are on different domains:
+  * Python Flask: `from flask_cors import CORS; CORS(app)`
+  * Python FastAPI: `app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])`
+  * Node/Express: `app.use(cors())` or manually set `Access-Control-Allow-Origin: *`
+  * Python http.server: Add `self.send_header('Access-Control-Allow-Origin', '*')` to ALL responses
+
+FRONTEND API CALL EXAMPLE (Next.js / React):
 ```javascript
-// CORRECT - Hardcoded backend URL
+// CRITICAL: Use env variable, NEVER hardcode localhost
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
+
 async function loadPosts() {{
     try {{
-        const response = await fetch('http://127.0.0.1:8000/api/posts');
-        if (!response.ok) throw new Error(`HTTP {{response.status}}`);
+        const response = await fetch(`${{API_BASE_URL}}/api/posts`);
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const data = await response.json();
-        displayPosts(data.posts || data);  // Handle response structure
+        displayPosts(data.posts || data);
     }} catch (error) {{
         document.getElementById('error').textContent = 'Failed to load posts: ' + error.message;
     }}
 }}
+```
 
-// WRONG - Don't use relative URLs or window.location
-// fetch('/api/posts')  ❌ Will fail!
-// fetch(window.location.origin + '/api/posts')  ❌ Wrong port!
+FRONTEND API CALL EXAMPLE (Plain HTML/JS — PREFERRED PATTERN):
+```javascript
+// CRITICAL: Use window.__API_BASE_URL__ which is injected at deploy time
+// The empty string fallback means relative URL (works when same-origin)
+const API_BASE_URL = window.__API_BASE_URL__ || '';
+
+async function loadPosts() {{
+    try {{
+        const response = await fetch(`${{API_BASE_URL}}/api/posts`);
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+        const data = await response.json();
+        displayPosts(data.posts || data);
+    }} catch (error) {{
+        document.getElementById('error').textContent = 'Failed to load: ' + error.message;
+    }}
+}}
+```
+
+⚠️ WRONG (will break in production):
+```javascript
+// ❌ WRONG: const API_BASE_URL = 'http://localhost:8000';
+// ❌ WRONG: fetch('http://127.0.0.1:8000/api/posts')
+// ✅ RIGHT: const API_BASE_URL = window.__API_BASE_URL__ || '';
+// ✅ RIGHT: fetch(API_BASE_URL + '/api/posts')
 ```
 
 ═══════════════════════════════════════════════════════════════════════════════
@@ -619,41 +663,72 @@ When enhancing server files (server.js, adminserver.js, etc.):
 9. You may ADD: better error handling, logging, comments
 
 ═══════════════════════════════════════════════════════════════════════════════
-SECTION 3.5: FRONTEND-BACKEND CONNECTION (CRITICAL!)
+SECTION 3.5: FRONTEND-BACKEND CONNECTION (CRITICAL - READ EVERY LINE!)
 ═══════════════════════════════════════════════════════════════════════════════
 
-When generating frontend files (HTML/JS) that call backend APIs:
+The frontend and backend run on COMPLETELY SEPARATE domains (not localhost!).
+The backend URL is injected at deploy time. You MUST use a variable, NEVER a hardcoded URL.
 
-- **API BASE URL**: Frontend must call backend at `http://127.0.0.1:8000`
-  * Both frontend and backend run in SAME sandbox (not separate servers)
-  * DO NOT use window.location.origin or relative URLs for API calls
-  * Example: `fetch('http://127.0.0.1:8000/api/posts')`
-  
+⚠️  ABSOLUTE RULES (violating ANY will break the app):
+  1. NEVER write `http://localhost:8000` or `http://127.0.0.1:8000` ANYWHERE in frontend code
+  2. NEVER write `http://localhost:5000` or ANY `http://localhost:XXXX` in frontend code
+  3. ALWAYS define API_BASE_URL as a variable at the TOP of EVERY file that makes API calls
+  4. ALWAYS use that variable for ALL fetch/axios/XMLHttpRequest calls
+
+- **For plain HTML/JS**: `const API_BASE_URL = window.__API_BASE_URL__ || '';`
+- **For Next.js/React**: `const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';`
+- **For Vite**: `const API_BASE_URL = import.meta.env.VITE_API_URL || '';`
+
 - **ENDPOINT CONSISTENCY**: Frontend calls must match backend routes EXACTLY
-  * If backend has `/api/posts`, frontend must call `/api/posts` (not `/posts`)
-  * If backend has `/login`, frontend must call `/login` (not `/auth/login`)
+  * `fetch(API_BASE_URL + '/api/posts')` NOT `fetch('http://localhost:8000/api/posts')`
+
+- **CORS**: Backend MUST include CORS headers:
+  * Flask: `from flask_cors import CORS; CORS(app)`
+  * FastAPI: `app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])`
+  * Express: `app.use(cors())`
 
 - **ERROR HANDLING**: Add try-catch and user-friendly errors
-  * Check response.ok before parsing JSON
-  * Display errors in UI (not just console.log)
 
-FRONTEND API CALL EXAMPLE:
+FRONTEND API CALL EXAMPLE (Next.js / React):
 ```javascript
-// CORRECT - Hardcoded backend URL at 127.0.0.1:8000
+// CRITICAL: Use env variable, NEVER hardcode localhost
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || '';
+
 async function loadPosts() {{
     try {{
-        const response = await fetch('http://127.0.0.1:8000/api/posts');
-        if (!response.ok) throw new Error(`HTTP {{response.status}}`);
+        const response = await fetch(`${{API_BASE_URL}}/api/posts`);
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
         const data = await response.json();
         displayPosts(data.posts || data);
     }} catch (error) {{
         document.getElementById('error').textContent = 'Failed to load: ' + error.message;
     }}
 }}
+```
 
-// WRONG - Don't use these patterns:
-// fetch('/api/posts')  ❌ Relative URL won't work!
-// fetch(window.location.origin + '/api/posts')  ❌ Wrong port!
+FRONTEND API CALL EXAMPLE (Plain HTML/JS — PREFERRED PATTERN):
+```javascript
+// CRITICAL: window.__API_BASE_URL__ is injected at deploy time
+const API_BASE_URL = window.__API_BASE_URL__ || '';
+
+async function loadPosts() {{
+    try {{
+        const response = await fetch(`${{API_BASE_URL}}/api/posts`);
+        if (!response.ok) throw new Error(`HTTP ${{response.status}}`);
+        const data = await response.json();
+        displayPosts(data.posts || data);
+    }} catch (error) {{
+        document.getElementById('error').textContent = 'Failed to load: ' + error.message;
+    }}
+}}
+```
+
+⚠️ WRONG (will break):
+```javascript
+// ❌ WRONG: fetch('http://localhost:8000/api/posts')
+// ❌ WRONG: const API_BASE_URL = 'http://127.0.0.1:8000';
+// ✅ RIGHT: const API_BASE_URL = window.__API_BASE_URL__ || '';
+// ✅ RIGHT: fetch(API_BASE_URL + '/api/posts')
 ```
 
 ═══════════════════════════════════════════════════════════════════════════════

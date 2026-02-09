@@ -2,9 +2,9 @@
   "repo_url": "https://github.com/ArunN2005/demo-legacy-blog",
   "repo_id": "65326b9bb91efe79",
   "created_at": "2026-02-09T19:49:14.966752",
-  "last_resurrection": "2026-02-09T20:51:32.511985",
-  "total_attempts": 14,
-  "successful_attempts": 5,
+  "last_resurrection": "2026-02-10T02:05:45.320091",
+  "total_attempts": 50,
+  "successful_attempts": 21,
   "failed_attempts": 0,
   "tech_stack": {
     "detected_backend": "Flask",
@@ -14,11 +14,6 @@
   },
   "decisions": [
     {
-      "timestamp": "2026-02-09T20:01:01.058033",
-      "decision": "Resurrection completed successfully",
-      "outcome": "success"
-    },
-    {
       "timestamp": "2026-02-09T20:22:09.777126",
       "decision": "Resurrection completed successfully",
       "outcome": "success"
@@ -37,13 +32,94 @@
       "timestamp": "2026-02-09T20:52:42.728402",
       "decision": "Resurrection completed successfully",
       "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T22:33:11.250454",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T22:45:51.683937",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T22:45:51.815491",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T22:53:31.578333",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T23:18:11.956560",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-09T23:45:48.977031",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T00:02:02.742573",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T00:10:37.102555",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T00:20:30.032536",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T00:59:51.235270",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T01:01:25.271250",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T01:08:53.903267",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T01:28:21.198473",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T01:49:09.144177",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T02:03:21.440346",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    },
+    {
+      "timestamp": "2026-02-10T02:06:55.254127",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
     }
   ],
   "failures": [],
   "dependency_issues": [],
   "successful_patterns": [
     "Runtime: python",
-    "Entrypoint: app.py"
+    "Entrypoint: app.py",
+    "Entrypoint: backend/app.py"
   ],
   "user_preferences": {
     "keep_original_paths": true,
@@ -53,35 +129,70 @@
   },
   "resurrection_history": [
     {
-      "timestamp": "2026-02-09T20:01:01.058033",
+      "timestamp": "2026-02-10T00:02:02.742608",
       "outcome": "success",
       "decisions": [
         "Resurrection completed successfully"
       ]
     },
     {
-      "timestamp": "2026-02-09T20:22:09.777126",
+      "timestamp": "2026-02-10T00:10:37.102607",
       "outcome": "success",
       "decisions": [
         "Resurrection completed successfully"
       ]
     },
     {
-      "timestamp": "2026-02-09T20:33:13.807181",
+      "timestamp": "2026-02-10T00:20:30.032591",
       "outcome": "success",
       "decisions": [
         "Resurrection completed successfully"
       ]
     },
     {
-      "timestamp": "2026-02-09T20:39:09.292459",
+      "timestamp": "2026-02-10T00:59:51.235286",
       "outcome": "success",
       "decisions": [
         "Resurrection completed successfully"
       ]
     },
     {
-      "timestamp": "2026-02-09T20:52:42.728402",
+      "timestamp": "2026-02-10T01:01:25.271267",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-10T01:08:53.903288",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-10T01:28:21.198494",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-10T01:49:09.144196",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-10T02:03:21.440361",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    },
+    {
+      "timestamp": "2026-02-10T02:06:55.254140",
       "outcome": "success",
       "decisions": [
         "Resurrection completed successfully"

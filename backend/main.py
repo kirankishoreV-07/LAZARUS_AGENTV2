@@ -2,12 +2,59 @@ import json
 import time
 import logging
 import threading
+import uuid
 from collections import deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 from lazarus_agent import process_resurrection, commit_code, LazarusEngine
+from image_gen import (
+    scan_images_in_code, suggest_image_prompt,
+    generate_image, replace_image_in_code, embed_image_as_asset,
+)
 import sys
 import traceback
+
+# ══════════════════════════════════════════════════════════════
+# CHECKPOINT SESSION MANAGEMENT
+# ══════════════════════════════════════════════════════════════
+
+# Active checkpoint sessions: session_id -> {event, response, generator}
+checkpoint_sessions = {}
+checkpoint_sessions_lock = threading.Lock()
+
+def create_checkpoint_session():
+    """Create a new session for checkpoint-based resurrection."""
+    session_id = str(uuid.uuid4())[:8]
+    with checkpoint_sessions_lock:
+        checkpoint_sessions[session_id] = {
+            "event": threading.Event(),
+            "response": None,  # Will be set by /api/resurrect/continue
+        }
+    return session_id
+
+def wait_for_checkpoint_response(session_id, timeout=600):
+    """Block until the user responds to a checkpoint (10 min timeout)."""
+    with checkpoint_sessions_lock:
+        session = checkpoint_sessions.get(session_id)
+    if not session:
+        return {"action": "continue"}
+    
+    session["event"].wait(timeout=timeout)
+    session["event"].clear()  # Reset for next checkpoint
+    return session.get("response") or {"action": "continue"}
+
+def signal_checkpoint_continue(session_id, response_data):
+    """Signal a checkpoint to continue with user's response."""
+    with checkpoint_sessions_lock:
+        session = checkpoint_sessions.get(session_id)
+    if session:
+        session["response"] = response_data
+        session["event"].set()
+
+def cleanup_session(session_id):
+    """Clean up a completed session."""
+    with checkpoint_sessions_lock:
+        checkpoint_sessions.pop(session_id, None)
 
 # ══════════════════════════════════════════════════════════════
 # DETAILED LOGGING SYSTEM
@@ -78,6 +125,16 @@ class LazarusHandler(BaseHTTPRequestHandler):
         """Override default logging to use our detailed logger."""
         logger.info(f"HTTP {args[0]}" if args else format)
 
+    def end_headers(self):
+        """Override to ALWAYS inject CORS headers on every response.
+        This permanently fixes frontend-backend connection issues caused by
+        missing CORS headers on error/fallback routes."""
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With')
+        self.send_header('Access-Control-Max-Age', '86400')
+        super().end_headers()
+
     def _log_request_start(self, method: str):
         """Log incoming request with full details."""
         client_ip = self.client_address[0]
@@ -115,13 +172,11 @@ class LazarusHandler(BaseHTTPRequestHandler):
         })
 
     def do_OPTIONS(self):
+        """Handle CORS preflight — CORS headers auto-injected by end_headers()."""
         self._log_request_start('OPTIONS')
-        self.send_response(200)
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_response(204)
         self.end_headers()
-        self._log_response(200)
+        self._log_response(204)
 
     def do_GET(self):
         from urllib.parse import urlparse, parse_qs
@@ -138,7 +193,6 @@ class LazarusHandler(BaseHTTPRequestHandler):
                     logs = [e for e in debug_log_buffer if e['timestamp'] > since]
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 response_data = json.dumps({"logs": logs, "server_time": time.time()})
                 self.wfile.write(response_data.encode())
@@ -146,7 +200,6 @@ class LazarusHandler(BaseHTTPRequestHandler):
                 self._log_error(e, '/api/debug-logs')
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
             return
@@ -160,7 +213,6 @@ class LazarusHandler(BaseHTTPRequestHandler):
                 if not repo_url:
                     self.send_response(400)
                     self.send_header('Content-type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": "Missing repo_url"}).encode())
                     self._log_response(400, extra='Missing repo_url')
@@ -172,7 +224,6 @@ class LazarusHandler(BaseHTTPRequestHandler):
 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 response_data = json.dumps({"files": files})
                 self.wfile.write(response_data.encode())
@@ -184,7 +235,6 @@ class LazarusHandler(BaseHTTPRequestHandler):
                 self._log_error(e, '/api/scan')
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
                 self._log_response(500, extra=str(e))
@@ -198,7 +248,6 @@ class LazarusHandler(BaseHTTPRequestHandler):
                 if not repo_url:
                     self.send_response(400)
                     self.send_header('Content-type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": "Missing repo_url"}).encode())
                     self._log_response(400, extra='Missing repo_url')
@@ -207,7 +256,6 @@ class LazarusHandler(BaseHTTPRequestHandler):
                 # Use NDJSON streaming for real-time updates
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/x-ndjson')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.send_header('Cache-Control', 'no-cache')
                 self.send_header('Connection', 'keep-alive')
                 self.end_headers()
@@ -426,7 +474,6 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
                     try:
                         self.send_response(500)
                         self.send_header('Content-type', 'application/json')
-                        self.send_header('Access-Control-Allow-Origin', '*')
                         self.end_headers()
                         self.wfile.write(json.dumps({"error": str(e)}).encode())
                     except Exception:
@@ -441,7 +488,6 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
                 if not repo_url or not file_path:
                     self.send_response(400)
                     self.send_header('Content-type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({"error": "Missing repo_url or path"}).encode())
                     return
@@ -467,20 +513,20 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"content": content, "path": file_path}).encode())
 
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"error": str(e)}).encode())
 
         else:
             self.send_response(404)
+            self.send_header('Content-type', 'application/json')
             self.end_headers()
+            self.wfile.write(json.dumps({"status": "error", "message": f"Unknown GET endpoint: {self.path}"}).encode())
 
     def do_POST(self):
         self._log_request_start('POST')
@@ -495,26 +541,56 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
                 repo_url = request_json.get('repo_url')
                 vibe_instructions = request_json.get('vibe_instructions')
 
-                logger.info(f"🧬 RESURRECTION STARTED for: {repo_url}")
+                # Create a checkpoint session
+                session_id = create_checkpoint_session()
+                
+                logger.info(f"🧬 RESURRECTION STARTED for: {repo_url} (session: {session_id})")
                 logger.info(f"   Instructions: {(vibe_instructions or 'None')[:200]}")
                 add_debug_log('INFO', 'RESURRECT', 'Resurrection started', {
                     'repo_url': repo_url,
+                    'session_id': session_id,
                     'instructions_length': len(vibe_instructions or ''),
                     'instructions_preview': (vibe_instructions or '')[:500],
                 })
 
                 self.send_response(200)
-                # Use NDJSON (Newline Delimited JSON) for easy parsing
                 self.send_header('Content-Type', 'application/x-ndjson')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                # Disable buffering
                 self.send_header('Cache-Control', 'no-cache')
                 self.send_header('Connection', 'keep-alive')
                 self.end_headers()
+                
+                # Send session_id to frontend first
+                session_chunk = json.dumps({"type": "session", "session_id": session_id}) + "\n"
+                self.wfile.write(session_chunk.encode('utf-8'))
+                self.wfile.flush()
 
-                # Call the generator with detailed logging
+                # Call the generator with checkpoint support
                 chunk_count = 0
                 for chunk in process_resurrection(repo_url, vibe_instructions):
+                    chunk_count += 1
+                    
+                    # Handle checkpoint chunks — pause and wait for user
+                    if chunk.get('type') == 'checkpoint':
+                        chunk['session_id'] = session_id
+                        line = json.dumps(chunk) + "\n"
+                        self.wfile.write(line.encode('utf-8'))
+                        self.wfile.flush()
+                        
+                        checkpoint_id = chunk.get('id', 'unknown')
+                        logger.info(f"   ⏸️  CHECKPOINT: {checkpoint_id} — Waiting for user response...")
+                        add_debug_log('INFO', 'CHECKPOINT', f'Paused at {checkpoint_id}', {'session_id': session_id})
+                        
+                        # Block until user responds via /api/resurrect/continue
+                        user_response = wait_for_checkpoint_response(session_id)
+                        
+                        logger.info(f"   ▶️  CHECKPOINT RESUMED: {checkpoint_id} — Action: {user_response.get('action', 'continue')}")
+                        add_debug_log('INFO', 'CHECKPOINT', f'Resumed: {checkpoint_id}', {'response': user_response})
+                        
+                        # Yield a resume log
+                        resume_line = json.dumps({"type": "log", "content": f"▶️ Resuming after {checkpoint_id}..."}) + "\n"
+                        self.wfile.write(resume_line.encode('utf-8'))
+                        self.wfile.flush()
+                        continue
                     chunk_count += 1
                     # Write chunk as JSON line + newline
                     line = json.dumps(chunk) + "\n"
@@ -540,18 +616,56 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
                 logger.info(f"🏁 RESURRECTION COMPLETE in {elapsed:.1f}s | {chunk_count} chunks streamed")
                 add_debug_log('INFO', 'RESURRECT', f'Resurrection complete', {'elapsed_ms': round(elapsed * 1000), 'chunks': chunk_count})
                 
+                # Clean up session
+                cleanup_session(session_id)
+                
             except Exception as e:
                 self._log_error(e, '/api/resurrect')
                 try:
                     error_line = json.dumps({"type": "log", "content": f"[ERROR] {str(e)}"}) + "\n"
                     self.wfile.write(error_line.encode('utf-8'))
                     self.wfile.flush()
-                    # Send a result with error status so frontend can exit loading state
                     result_line = json.dumps({"type": "result", "data": {"logs": str(e), "artifacts": [], "preview": "", "status": "Error", "retry_count": 0, "errors": [{"attempt": 1, "type": "EXCEPTION", "message": str(e)}]}}) + "\n"
                     self.wfile.write(result_line.encode('utf-8'))
                     self.wfile.flush()
                 except Exception:
                     pass
+                # Clean up session on error
+                try:
+                    cleanup_session(session_id)
+                except:
+                    pass
+
+        elif self.path == '/api/resurrect/continue':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                request_json = json.loads(post_data)
+                
+                session_id = request_json.get('session_id')
+                action = request_json.get('action', 'continue')  # 'continue' or 'modify'
+                feedback = request_json.get('feedback', '')
+                
+                logger.info(f"▶️ Checkpoint continue: session={session_id}, action={action}")
+                if feedback:
+                    logger.info(f"   Feedback: {feedback[:200]}")
+                
+                signal_checkpoint_continue(session_id, {
+                    "action": action,
+                    "feedback": feedback,
+                })
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok", "session_id": session_id}).encode())
+                
+            except Exception as e:
+                self._log_error(e, '/api/resurrect/continue')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e)}).encode())
 
         elif self.path == '/api/commit':
             try:
@@ -574,7 +688,6 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode())
                 self._log_response(200)
@@ -583,6 +696,301 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
                 self._log_error(e, '/api/commit')
                 self.send_error(500, str(e))
         
+        elif self.path == '/api/edit':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                request_json = json.loads(post_data)
+                
+                files = request_json.get('files', [])  # [{filename, content}]
+                edit_instructions = request_json.get('instructions', '')
+                all_filenames = request_json.get('all_filenames', [])  # full file list for context
+                
+                if not files or not edit_instructions:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "error", "message": "Missing files or instructions"}).encode())
+                    return
+                
+                logger.info(f"✏️ EDIT REQUEST: {len(files)} files, instructions: {edit_instructions[:200]}")
+                add_debug_log('INFO', 'EDIT', 'Edit request received', {
+                    'file_count': len(files),
+                    'filenames': [f['filename'] for f in files],
+                    'instructions': edit_instructions[:500],
+                })
+                
+                # Build the edit prompt for Gemini Pro
+                engine = LazarusEngine()
+                
+                file_contents = "\n\n".join([
+                    f"=== FILE: {f['filename']} ===\n```\n{f['content']}\n```"
+                    for f in files
+                ])
+                
+                project_context = ""
+                if all_filenames:
+                    project_context = f"\n\nFull project file list for context:\n" + "\n".join(f"- {fn}" for fn in all_filenames[:100])
+                
+                edit_prompt = f"""You are an expert code editor. The user wants to modify specific files in their project.
+
+USER'S EDIT INSTRUCTIONS:
+{edit_instructions}
+
+FILES TO EDIT:
+{file_contents}
+{project_context}
+
+CRITICAL RULES:
+1. Return ALL the files listed above, with your modifications applied
+2. If a file doesn't need changes based on the instructions, return it unchanged
+3. Keep all imports, dependencies, and existing functionality intact unless explicitly asked to remove them
+4. Follow the existing code style and patterns
+5. If the user asks for structural changes (new files, renamed files), include them
+
+OUTPUT FORMAT:
+Return ONLY a JSON array. No markdown, no explanation, no code fences.
+Each element must be: {{"filename": "path/to/file.ext", "content": "full file content"}}
+
+Example:
+[{{"filename": "src/App.tsx", "content": "import React from 'react';\\n..."}}, {{"filename": "src/styles.css", "content": "body {{ margin: 0; }}\\n..."}}]
+
+Return the complete modified files now:"""
+                
+                logger.info(f"   Calling Gemini Pro for edit ({len(edit_prompt)} chars)...")
+                add_debug_log('INFO', 'EDIT', 'Calling Gemini Pro', {'prompt_length': len(edit_prompt)})
+                
+                # Use Gemini 3 Pro for highest quality edits
+                raw_response = engine._call_gemini(edit_prompt, model="gemini-3-pro-preview")
+                
+                # Parse the response
+                import re
+                # Strip markdown code fences if present
+                cleaned = raw_response.strip()
+                cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
+                cleaned = re.sub(r'\n?```\s*$', '', cleaned)
+                cleaned = cleaned.strip()
+                
+                try:
+                    edited_files = json.loads(cleaned)
+                    if not isinstance(edited_files, list):
+                        raise ValueError("Response is not a JSON array")
+                except json.JSONDecodeError as je:
+                    logger.error(f"   ❌ Failed to parse Gemini edit response: {je}")
+                    logger.error(f"   Response preview: {cleaned[:500]}")
+                    add_debug_log('ERROR', 'EDIT', 'JSON parse failed', {
+                        'error': str(je),
+                        'response_preview': cleaned[:500],
+                    })
+                    # Try to extract JSON from the response
+                    json_match = re.search(r'\[[\s\S]*\]', cleaned)
+                    if json_match:
+                        edited_files = json.loads(json_match.group())
+                    else:
+                        self.send_response(200)
+                        self.send_header('Content-type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({
+                            "status": "error",
+                            "message": "AI returned invalid format. Please try again.",
+                            "files": []
+                        }).encode())
+                        return
+                
+                # Validate and normalize
+                result_files = []
+                for ef in edited_files:
+                    if isinstance(ef, dict) and 'filename' in ef and 'content' in ef:
+                        result_files.append({
+                            "filename": ef['filename'],
+                            "content": ef['content'],
+                        })
+                
+                logger.info(f"   ✅ Edit complete: {len(result_files)} files modified")
+                add_debug_log('INFO', 'EDIT', 'Edit complete', {
+                    'files_returned': len(result_files),
+                    'filenames': [f['filename'] for f in result_files],
+                })
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "success",
+                    "files": result_files,
+                    "message": f"Modified {len(result_files)} file(s)",
+                }).encode())
+            
+            except Exception as e:
+                self._log_error(e, '/api/edit')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": str(e), "files": []}).encode())
+
+        elif self.path == '/api/scan-images':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                request_json = json.loads(post_data)
+                
+                artifacts = request_json.get('artifacts', [])
+                
+                logger.info(f"🖼️ Scanning {len(artifacts)} files for image references...")
+                add_debug_log('INFO', 'IMAGE_SCAN', 'Scanning for images', {'artifact_count': len(artifacts)})
+                
+                image_refs = scan_images_in_code(artifacts)
+                
+                logger.info(f"   Found {len(image_refs)} image references")
+                add_debug_log('INFO', 'IMAGE_SCAN', f'Found {len(image_refs)} images', {
+                    'image_count': len(image_refs),
+                    'placeholders': sum(1 for r in image_refs if r.get('is_placeholder')),
+                })
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "success",
+                    "images": image_refs,
+                    "total": len(image_refs),
+                    "placeholders": sum(1 for r in image_refs if r.get('is_placeholder')),
+                }).encode())
+            
+            except Exception as e:
+                self._log_error(e, '/api/scan-images')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
+
+        elif self.path == '/api/generate-image':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                request_json = json.loads(post_data)
+                
+                prompt = request_json.get('prompt', '')
+                aspect_ratio = request_json.get('aspect_ratio', '1:1')
+                style = request_json.get('style', 'auto')
+                use_pro = request_json.get('use_pro', False)
+                website_context = request_json.get('website_context', '')
+                
+                # Auto-suggest prompt if context is provided
+                if not prompt and request_json.get('context'):
+                    context = request_json['context']
+                    alt_text = request_json.get('alt', '')
+                    element_info = request_json.get('element_info')
+                    prompt = suggest_image_prompt(context, alt_text, element_info)
+                
+                if not prompt:
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "error", "message": "Missing prompt"}).encode())
+                    return
+                
+                logger.info(f"🎨 Image generation requested: '{prompt[:80]}' | ratio={aspect_ratio} | style={style}")
+                add_debug_log('INFO', 'IMAGE_GEN', 'Generating image', {
+                    'prompt': prompt[:200],
+                    'aspect_ratio': aspect_ratio,
+                    'style': style,
+                })
+                
+                result = generate_image(prompt, aspect_ratio, style, use_pro, website_context)
+                result['original_prompt'] = prompt  # Include original for display
+                
+                if result.get('success'):
+                    logger.info(f"   ✅ Image generated: {result.get('mime_type')} | {len(result.get('image_base64', ''))} b64 chars")
+                    add_debug_log('INFO', 'IMAGE_GEN', 'Image generated successfully', {
+                        'mime_type': result.get('mime_type'),
+                        'size': len(result.get('image_base64', '')),
+                        'is_fallback': result.get('is_fallback', False),
+                    })
+                else:
+                    logger.error(f"   ❌ Image generation failed: {result.get('error')}")
+                    add_debug_log('ERROR', 'IMAGE_GEN', 'Generation failed', {'error': result.get('error')})
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(result).encode())
+            
+            except Exception as e:
+                self._log_error(e, '/api/generate-image')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
+
+        elif self.path == '/api/suggest-image':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                request_json = json.loads(post_data)
+                
+                context = request_json.get('context', '')
+                alt_text = request_json.get('alt', '')
+                element_info = request_json.get('element_info')
+                
+                prompt = suggest_image_prompt(context, alt_text, element_info)
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "success",
+                    "suggested_prompt": prompt,
+                }).encode())
+            
+            except Exception as e:
+                self._log_error(e, '/api/suggest-image')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
+
+        elif self.path == '/api/replace-image':
+            try:
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                request_json = json.loads(post_data)
+                
+                artifacts = request_json.get('artifacts', [])
+                target_filename = request_json.get('target_filename', '')
+                old_src = request_json.get('old_src', '')
+                image_base64 = request_json.get('image_base64', '')
+                image_mime = request_json.get('image_mime', 'image/png')
+                
+                if not all([artifacts, target_filename, old_src, image_base64]):
+                    self.send_response(400)
+                    self.send_header('Content-type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"status": "error", "message": "Missing required fields"}).encode())
+                    return
+                
+                logger.info(f"🔄 Replacing image in {target_filename}: {old_src[:50]}")
+                
+                updated_artifacts = replace_image_in_code(
+                    artifacts, target_filename, old_src, image_base64, image_mime
+                )
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "success",
+                    "artifacts": updated_artifacts,
+                    "message": f"Replaced image in {target_filename}",
+                }).encode())
+            
+            except Exception as e:
+                self._log_error(e, '/api/replace-image')
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
+
         elif self.path == '/api/create-pr':
             try:
                 from lazarus_agent import commit_all_files
@@ -597,7 +1005,6 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
                 if not files or not repo_url:
                     self.send_response(400)
                     self.send_header('Content-type', 'application/json')
-                    self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({"status": "error", "message": "Missing repo_url or files"}).encode())
                     return
@@ -607,20 +1014,20 @@ Respond in this EXACT JSON format (no markdown, no code blocks, just raw JSON):
                 
                 self.send_response(200)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode())
 
             except Exception as e:
                 self.send_response(500)
                 self.send_header('Content-type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
         
         else:
             self.send_response(404)
+            self.send_header('Content-type', 'application/json')
             self.end_headers()
+            self.wfile.write(json.dumps({"status": "error", "message": f"Unknown POST endpoint: {self.path}"}).encode())
 
 def run(server_class=ThreadingHTTPServer, handler_class=LazarusHandler, port=PORT):
     server_address = ('', port)
@@ -629,7 +1036,7 @@ def run(server_class=ThreadingHTTPServer, handler_class=LazarusHandler, port=POR
     logger.info(f"{'═'*60}")
     logger.info(f"   Port:      {port}")
     logger.info(f"   Debug Logs: http://localhost:{port}/api/debug-logs")
-    logger.info(f"   Endpoints:  /api/scan, /api/analyze, /api/resurrect, /api/commit, /api/create-pr")
+    logger.info(f"   Endpoints:  /api/scan, /api/analyze, /api/resurrect, /api/commit, /api/create-pr, /api/generate-image, /api/scan-images")
     logger.info(f"{'═'*60}")
     add_debug_log('INFO', 'SERVER', 'Lazarus backend started', {'port': port})
     httpd = server_class(server_address, handler_class)

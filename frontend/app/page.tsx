@@ -5,7 +5,7 @@ import {
   Play, GitPullRequest, CheckCircle, Cpu, ShieldAlert,
   FolderTree, Terminal as TerminalIcon, Eye,
   Loader2, AlertCircle, Search, ArrowRight, Zap,
-  BarChart3, Bug,
+  BarChart3, Bug, Wand2, ImagePlus,
 } from 'lucide-react';
 import FileTree, { FileEntry } from './components/FileTree';
 import SyntaxHighlighter from './components/SyntaxHighlighter';
@@ -14,10 +14,62 @@ import AnalysisPanel from './components/AnalysisPanel';
 import PlanningPanel from './components/PlanningPanel';
 import ReviewPanel from './components/ReviewPanel';
 import DebugPanel from './components/DebugPanel';
+import EditPanel from './components/EditPanel';
+import CheckpointPanel from './components/CheckpointPanel';
+import ImageGenPanel from './components/ImageGenPanel';
 
 type Artifact = { filename: string; content: string };
 
 type Phase = 'logo' | 'input' | 'analyzing' | 'analysis' | 'planning' | 'building' | 'results';
+
+// ── Selector script injected into srcDoc preview when in edit mode ────
+function injectSelectorScript(html: string): string {
+  const script = `
+<style>
+  .__lz-hover { outline: 2px dashed #c678dd !important; outline-offset: 2px; cursor: crosshair !important; position: relative; }
+  .__lz-selected { outline: 3px solid #c678dd !important; outline-offset: 2px; background: rgba(198,120,221,0.08) !important; }
+  .__lz-badge { position: fixed; top: 8px; left: 8px; background: #c678dd; color: white; font: bold 10px/1 system-ui; padding: 4px 10px; border-radius: 6px; z-index: 99999; pointer-events: none; }
+</style>
+<script>
+(function() {
+  var sel = null;
+  document.addEventListener('mouseover', function(e) {
+    if (e.target === document.body || e.target === document.documentElement) return;
+    e.target.classList.add('__lz-hover');
+  }, true);
+  document.addEventListener('mouseout', function(e) {
+    e.target.classList.remove('__lz-hover');
+  }, true);
+  document.addEventListener('click', function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (sel) sel.classList.remove('__lz-selected');
+    sel = e.target;
+    sel.classList.add('__lz-selected');
+    var info = {
+      tag: sel.tagName || '',
+      text: (sel.textContent || '').trim().substring(0, 200),
+      src: sel.src || (sel.querySelector && sel.querySelector('img') ? sel.querySelector('img').src : ''),
+      className: (sel.className || '').toString().replace(/__lz-\\w+/g, '').trim(),
+      id: sel.id || '',
+      type: sel.type || '',
+      placeholder: sel.placeholder || '',
+      href: sel.href || '',
+      parentTag: sel.parentElement ? sel.parentElement.tagName : '',
+      innerHTML: (sel.innerHTML || '').substring(0, 500)
+    };
+    window.parent.postMessage({ type: 'lazarus-element-selected', data: info }, '*');
+  }, true);
+})();
+</script>`;
+  // Inject right before </head> or </body> or at the end
+  if (html.includes('</head>')) {
+    return html.replace('</head>', script + '</head>');
+  } else if (html.includes('</body>')) {
+    return html.replace('</body>', script + '</body>');
+  }
+  return html + script;
+}
 
 // ── Debug Toggle Button (fixed position) ────────────────────────────
 function DebugToggleButton({ showDebug, onToggle }: { showDebug: boolean; onToggle: () => void }) {
@@ -46,6 +98,187 @@ export default function Home() {
   const [instructions, setInstructions] = useState('');
   const [logs, setLogs] = useState<string[]>([]);
   const [preview, setPreview] = useState('');
+
+  // ── Helper: build self-contained preview from artifacts ────────
+  const buildPreviewFromArtifacts = useCallback((arts: Artifact[]): string => {
+    // Find main HTML file: index.html > any .html
+    const htmlFile = arts.find(a => {
+      const bn = a.filename.split('/').pop()?.toLowerCase() || '';
+      return bn === 'index.html';
+    }) || arts.find(a => {
+      const fn = a.filename.toLowerCase();
+      return fn.endsWith('.html') || fn.endsWith('.htm');
+    });
+    if (!htmlFile) return '';
+
+    let html = htmlFile.content;
+
+    // Collect CSS and JS files
+    const cssFiles = arts.filter(a => a.filename.toLowerCase().endsWith('.css'));
+    const jsFiles = arts.filter(a => a.filename.toLowerCase().endsWith('.js') && !a.filename.toLowerCase().endsWith('.json'));
+
+    // Inline CSS
+    for (const css of cssFiles) {
+      const basename = (css.filename.split('/').pop() || css.filename).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const linkRegex = new RegExp(
+        `<link[^>]*href=["'](?:[^"']*\\/)?${basename}["'][^>]*/?>`,
+        'gi'
+      );
+      if (linkRegex.test(html)) {
+        html = html.replace(linkRegex, `<style>\n${css.content}\n</style>`);
+      } else {
+        const styleTag = `<style>\n/* ${css.filename.split('/').pop()} */\n${css.content}\n</style>`;
+        if (html.includes('</head>')) {
+          html = html.replace('</head>', `${styleTag}\n</head>`);
+        } else {
+          html = styleTag + '\n' + html;
+        }
+      }
+    }
+
+    // Inline JS
+    for (const js of jsFiles) {
+      const basename = (js.filename.split('/').pop() || js.filename).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const scriptRegex = new RegExp(
+        `<script[^>]*src=["'](?:[^"']*\\/)?${basename}["'][^>]*>\\s*</script>`,
+        'gi'
+      );
+      if (scriptRegex.test(html)) {
+        html = html.replace(scriptRegex, `<script>\n${js.content}\n</script>`);
+      } else {
+        const scriptTag = `<script>\n/* ${js.filename.split('/').pop()} */\n${js.content}\n</script>`;
+        if (html.includes('</body>')) {
+          html = html.replace('</body>', `${scriptTag}\n</body>`);
+        } else {
+          html = html + '\n' + scriptTag;
+        }
+      }
+    }
+
+    return html;
+  }, []);
+
+  // ── Inject fetch interceptor into any preview HTML ────────
+  // Provides a full in-memory mock backend so resurrected apps work in preview.
+  // Supports CRUD operations with sample data for a realistic demo experience.
+  const injectFetchInterceptor = useCallback((html: string): string => {
+    if (!html || html.startsWith('http')) return html; // skip URL-based previews
+    
+    const fetchInterceptor = `<script>
+(function() {
+  // ── In-memory mock database with sample data ──
+  var _mockDB = {
+    posts: [
+      { id: "1", title: "Welcome to Our Modernized Blog", author: "Admin", content: "This blog has been resurrected and modernized by the Lazarus Engine. The legacy code has been updated with modern best practices, responsive design, and clean architecture.", created_at: new Date(Date.now() - 86400000*3).toISOString() },
+      { id: "2", title: "Getting Started with Modern Web Dev", author: "Dev Team", content: "Our stack now uses modern JavaScript, CSS Grid, Flexbox, and follows accessibility standards. The backend API is clean and RESTful.", created_at: new Date(Date.now() - 86400000*2).toISOString() },
+      { id: "3", title: "New Features Coming Soon", author: "Admin", content: "We are working on adding user authentication, rich text editing, image uploads, and comment sections. Stay tuned for updates!", created_at: new Date(Date.now() - 86400000).toISOString() }
+    ],
+    users: [{ id: "1", name: "Admin", email: "admin@example.com", role: "admin" }],
+    comments: [],
+    items: [{ id: "1", name: "Sample Item", description: "A sample item", price: 9.99 }],
+    _nextId: 100
+  };
+
+  function getCollection(path) {
+    var parts = path.replace(/^.*\\/api\\//, '').split('/');
+    var name = parts[0];
+    if (!_mockDB[name]) _mockDB[name] = [];
+    return { name: name, items: _mockDB[name], itemId: parts[1] || null };
+  }
+
+  var _origFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    var u = (typeof url === 'string') ? url : (url && url.url) || '';
+    opts = opts || {};
+    var method = (opts.method || 'GET').toUpperCase();
+
+    // Only intercept /api/ calls
+    var isApi = u.startsWith('/api/') || u.startsWith('api/') || (/^https?:\\/\\/localhost/.test(u) && u.includes('/api/'));
+    if (!isApi) return _origFetch.apply(this, arguments);
+
+    console.log('[LAZARUS Preview] Mock ' + method + ' ' + u);
+    var col = getCollection(u);
+
+    var responseData;
+    if (method === 'GET') {
+      if (col.itemId) {
+        responseData = col.items.find(function(x) { return x.id === col.itemId; }) || null;
+        if (!responseData) return Promise.resolve(new Response('{"error":"Not found"}', { status: 404, headers: {'Content-Type':'application/json'} }));
+      } else {
+        responseData = col.items;
+      }
+    } else if (method === 'POST') {
+      try {
+        var body = typeof opts.body === 'string' ? JSON.parse(opts.body) : (opts.body || {});
+        body.id = String(++_mockDB._nextId);
+        body.created_at = body.created_at || new Date().toISOString();
+        col.items.push(body);
+        responseData = body;
+      } catch(e) { responseData = { error: 'Invalid JSON' }; }
+    } else if (method === 'PUT' || method === 'PATCH') {
+      var idx = col.items.findIndex(function(x) { return x.id === col.itemId; });
+      if (idx >= 0) {
+        try {
+          var updates = typeof opts.body === 'string' ? JSON.parse(opts.body) : (opts.body || {});
+          Object.assign(col.items[idx], updates);
+          responseData = col.items[idx];
+        } catch(e) { responseData = col.items[idx]; }
+      } else { return Promise.resolve(new Response('{"error":"Not found"}', { status: 404, headers: {'Content-Type':'application/json'} })); }
+    } else if (method === 'DELETE') {
+      var di = col.items.findIndex(function(x) { return x.id === col.itemId; });
+      if (di >= 0) { responseData = col.items.splice(di, 1)[0]; }
+      else { responseData = { success: true }; }
+    } else {
+      responseData = [];
+    }
+
+    return Promise.resolve(new Response(JSON.stringify(responseData), {
+      status: 200, headers: { 'Content-Type': 'application/json' }
+    }));
+  };
+
+  // Also intercept XMLHttpRequest for older code
+  var _origXHROpen = XMLHttpRequest.prototype.open;
+  var _origXHRSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url) {
+    this._lzMethod = method;
+    this._lzUrl = (typeof url === 'string') ? url : '';
+    var isApi = this._lzUrl.startsWith('/api/') || this._lzUrl.startsWith('api/') || (/^https?:\\/\\/localhost/.test(this._lzUrl) && this._lzUrl.includes('/api/'));
+    this._lzMocked = isApi;
+    if (!isApi) return _origXHROpen.apply(this, arguments);
+    return _origXHROpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function(body) {
+    if (this._lzMocked) {
+      var self = this;
+      var col = getCollection(self._lzUrl);
+      var method = (self._lzMethod || 'GET').toUpperCase();
+      var result;
+      if (method === 'GET') { result = col.itemId ? (col.items.find(function(x){return x.id===col.itemId}) || {}) : col.items; }
+      else if (method === 'POST') { try { var b = JSON.parse(body||'{}'); b.id=String(++_mockDB._nextId); b.created_at=new Date().toISOString(); col.items.push(b); result=b; } catch(e){result={};} }
+      else if (method === 'DELETE') { var i=col.items.findIndex(function(x){return x.id===col.itemId}); if(i>=0)col.items.splice(i,1); result={success:true}; }
+      else { result = col.items; }
+      var json = JSON.stringify(result);
+      Object.defineProperty(self, 'status', { value: 200, writable: true });
+      Object.defineProperty(self, 'responseText', { value: json, writable: true });
+      Object.defineProperty(self, 'response', { value: json, writable: true });
+      Object.defineProperty(self, 'readyState', { value: 4, writable: true });
+      setTimeout(function() { if(self.onload)self.onload(); if(self.onreadystatechange)self.onreadystatechange(); }, 10);
+      return;
+    }
+    return _origXHRSend.apply(this, arguments);
+  };
+})();
+</script>`;
+
+    if (html.includes('<head>')) {
+      return html.replace('<head>', '<head>' + fetchInterceptor);
+    } else if (html.includes('<html>')) {
+      return html.replace('<html>', '<html><head>' + fetchInterceptor + '</head>');
+    }
+    return fetchInterceptor + html;
+  }, []);
+
   const [isLoading, setIsLoading] = useState(false);
 
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
@@ -59,7 +292,7 @@ export default function Home() {
   const [scanError, setScanError] = useState<string | null>(null);
   const [hasScanned, setHasScanned] = useState(false);
 
-  const [rightTab, setRightTab] = useState<'code' | 'terminal' | 'preview'>('code');
+  const [rightTab, setRightTab] = useState<'code' | 'terminal' | 'preview' | 'image-studio'>('code');
 
   const [fileContentCache, setFileContentCache] = useState<Record<string, string>>({});
   const [isFetchingFile, setIsFetchingFile] = useState(false);
@@ -77,8 +310,64 @@ export default function Home() {
 
   // ── Debug panel state ──────────────────────────────────────────
   const [showDebug, setShowDebug] = useState(false);
+  // ── Checkpoint state ───────────────────────────────────────
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [checkpointData, setCheckpointData] = useState<any>(null);
+  const [isResuming, setIsResuming] = useState(false);
+  const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
+  const streamDecoderRef = useRef<TextDecoder | null>(null);
+  const streamBufferRef = useRef<string>('');
+
+  // ── Edit mode state ────────────────────────────────────────
+  const [editMode, setEditMode] = useState(false);
+  const [imageGenMode, setImageGenMode] = useState(false);
+  const [checkedFiles, setCheckedFiles] = useState<Set<string>>(new Set());
+  const [isEditing, setIsEditing] = useState(false);
+  const [selectedElement, setSelectedElement] = useState<{
+    tag: string; text: string; src?: string; className?: string;
+    id?: string; type?: string; placeholder?: string; href?: string;
+    parentTag?: string; innerHTML?: string;
+  } | null>(null);
 
   useEffect(() => { document.documentElement.classList.add('dark'); }, []);
+
+  // ── Listen for element selection from preview iframe ────────
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === 'lazarus-element-selected' && editMode) {
+        const info = e.data.data;
+        setSelectedElement(info);
+        // Auto-detect which files contain this element
+        const searchText = info.text?.trim();
+        const searchId = info.id;
+        const searchSrc = info.src;
+        if (searchText || searchId || searchSrc) {
+          const matchedFiles = new Set<string>(checkedFiles);
+          for (const art of artifacts) {
+            let matched = false;
+            if (searchText && searchText.length > 2 && searchText.length < 200) {
+              // Search for the text in the file content
+              if (art.content.includes(searchText) ||
+                  art.content.includes(searchText.substring(0, 30))) matched = true;
+            }
+            if (searchId && art.content.includes(`id="${searchId}"`) ||
+                art.content.includes(`id='${searchId}'`) ||
+                art.content.includes(`id: '${searchId}'`)) matched = true;
+            if (searchSrc && art.content.includes(searchSrc)) matched = true;
+            // Also match HTML/JS/CSS files that are likely frontend files
+            if (matched && !art.filename.endsWith('.py') && !art.filename.endsWith('.ps1')) {
+              matchedFiles.add(art.filename);
+            }
+          }
+          if (matchedFiles.size > 0) setCheckedFiles(matchedFiles);
+        }
+        // Switch to preview tab to show the selection
+        setRightTab('preview');
+      }
+    };
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [editMode, artifacts, checkedFiles]);
 
   // ── SCAN + ANALYZE (no instructions asked) ─────────────────────
   const scanAndAnalyze = useCallback(async () => {
@@ -139,6 +428,111 @@ export default function Home() {
     }
   }, [repoUrl]);
 
+  // ── Stream reading helper (resumable) ───────────────────────────
+  const consumeStream = useCallback(async (
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    decoder: TextDecoder,
+    initialBuffer: string,
+  ) => {
+    let buffer = initialBuffer;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      for (let i = 0; i < lines.length - 1; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+        try {
+          const chunk = JSON.parse(line);
+          if (chunk.type === 'session') {
+            // Store session ID for checkpoint communication
+            setSessionId(chunk.session_id);
+          } else if (chunk.type === 'checkpoint') {
+            // Pause the stream — save reader state and show checkpoint UI
+            setCheckpointData(chunk);
+            streamReaderRef.current = reader;
+            streamDecoderRef.current = decoder;
+            streamBufferRef.current = lines.slice(i + 1).join('\n');
+            setLogs(prev => [...prev, `[⏸] Checkpoint: ${chunk.title}`]);
+            return; // exit — resumeFromCheckpoint will continue reading
+          } else if (chunk.type === 'log') {
+            setLogs(prev => [...prev, chunk.content]);
+          } else if (chunk.type === 'repo_files') {
+            setRepoFiles(chunk.files || []);
+            setHasScanned(true);
+          } else if (chunk.type === 'result') {
+            const res = chunk.data;
+            const arts: Artifact[] = res.artifacts || [];
+            setArtifacts(arts);
+            
+            // Build preview: use backend preview if present, else auto-construct
+            let previewContent = res.preview || '';
+            if (!previewContent && arts.length > 0) {
+              previewContent = buildPreviewFromArtifacts(arts);
+            }
+            setPreview(injectFetchInterceptor(previewContent));
+            
+            setBuildStatus(res.status || 'Unknown');
+            setBuildRetryCount(res.retry_count || 0);
+            setBuildErrors(res.errors || []);
+            if (arts.length) {
+              setSelectedFile(arts[0].filename);
+              setRightTab('code');
+            }
+            if (previewContent) setRightTab('preview');
+            setIsLoading(false);
+            setIterationCount(prev => prev + 1);
+            setPhase('results');
+          }
+        } catch { /* skip bad JSON lines */ }
+      }
+      buffer = lines[lines.length - 1];
+    }
+
+    // Stream ended — finalize
+    setIsLoading(false);
+    setCheckpointData(null);
+    setSessionId(null);
+    streamReaderRef.current = null;
+  }, []);
+
+  // ── Resume from checkpoint ─────────────────────────────────────
+  const resumeFromCheckpoint = useCallback(async (action: 'continue' | 'modify', feedback: string) => {
+    if (!sessionId) return;
+    setIsResuming(true);
+    setCheckpointData(null);
+
+    try {
+      // Signal the backend to continue
+      const resp = await fetch('http://localhost:8000/api/resurrect/continue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, action, feedback }),
+      });
+      if (!resp.ok) {
+        setLogs(prev => [...prev, `[ERROR] Failed to resume: ${resp.statusText}`]);
+        setIsResuming(false);
+        return;
+      }
+
+      setLogs(prev => [...prev, `[▶] Resumed — ${action === 'modify' ? 'applying feedback...' : 'continuing...'}`]);
+      setIsResuming(false);
+
+      // Resume reading from the same stream
+      const reader = streamReaderRef.current;
+      const decoder = streamDecoderRef.current;
+      const buffer = streamBufferRef.current;
+      if (reader && decoder) {
+        await consumeStream(reader, decoder, buffer);
+      }
+    } catch (err) {
+      setLogs(prev => [...prev, `[ERROR] Resume failed: ${err}`]);
+      setIsResuming(false);
+    }
+  }, [sessionId, consumeStream]);
+
   // ── START BUILD (called from PlanningPanel) ────────────────────
   const startBuild = useCallback(async (
     selectedDrawbacks: string[],
@@ -160,6 +554,12 @@ export default function Home() {
     }
     const combinedInstructions = parts.join('\n\n');
     setInstructions(combinedInstructions);
+
+    // Reset checkpoint state
+    setSessionId(null);
+    setCheckpointData(null);
+    setIsResuming(false);
+    streamReaderRef.current = null;
 
     // Start building
     setPhase('building');
@@ -186,51 +586,14 @@ export default function Home() {
       const decoder = new TextDecoder();
       if (!reader) throw new Error('No stream');
 
-      let buffer = '';
       setLogs([]);
+      await consumeStream(reader, decoder, '');
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        for (let i = 0; i < lines.length - 1; i++) {
-          const line = lines[i].trim();
-          if (!line) continue;
-          try {
-            const chunk = JSON.parse(line);
-            if (chunk.type === 'log') {
-              setLogs(prev => [...prev, chunk.content]);
-            } else if (chunk.type === 'repo_files') {
-              setRepoFiles(chunk.files || []);
-              setHasScanned(true);
-            } else if (chunk.type === 'result') {
-              const res = chunk.data;
-              setArtifacts(res.artifacts || []);
-              setPreview(res.preview || '');
-              setBuildStatus(res.status || 'Unknown');
-              setBuildRetryCount(res.retry_count || 0);
-              setBuildErrors(res.errors || []);
-              if (res.artifacts?.length) {
-                setSelectedFile(res.artifacts[0].filename);
-                setRightTab('code');
-              }
-              if (res.preview) setRightTab('preview');
-              setIsLoading(false);
-              setIterationCount(prev => prev + 1);
-              setPhase('results');
-            }
-          } catch { /* skip */ }
-        }
-        buffer = lines[lines.length - 1];
-      }
-      setIsLoading(false);
-      if (phase === 'building') setPhase('results');
     } catch (error) {
       setLogs(prev => [...prev, `[ERROR] ${error}`]);
       setIsLoading(false);
     }
-  }, [repoUrl, iterationCount, phase]);
+  }, [repoUrl, iterationCount, consumeStream]);
 
   // ── REFINE (called from ReviewPanel) ───────────────────────────
   const handleRefine = useCallback((feedback: string) => {
@@ -238,6 +601,106 @@ export default function Home() {
     startBuild([], [], `${instructions}\n\nUSER FEEDBACK FROM PREVIOUS BUILD:\n${feedback}`);
   }, [instructions, startBuild]);
 
+  // ── Checkpoint handlers ────────────────────────────────────────
+  const handleCheckpointContinue = useCallback((feedback: string) => {
+    resumeFromCheckpoint('continue', feedback);
+  }, [resumeFromCheckpoint]);
+
+  const handleCheckpointModify = useCallback((feedback: string) => {
+    resumeFromCheckpoint('modify', feedback);
+  }, [resumeFromCheckpoint]);
+
+  // ── Edit mode handlers ─────────────────────────────────────────
+  const toggleFileCheck = useCallback((path: string) => {
+    setCheckedFiles(prev => {
+      const next = new Set(prev);
+      next.has(path) ? next.delete(path) : next.add(path);
+      return next;
+    });
+  }, []);
+
+  const handleSubmitEdit = useCallback(async (
+    files: { filename: string; content: string }[],
+    editInstructions: string,
+  ) => {
+    setIsEditing(true);
+    try {
+      const response = await fetch('http://localhost:8000/api/edit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          files,
+          instructions: editInstructions,
+          all_filenames: artifacts.map(a => a.filename),
+        }),
+      });
+      if (!response.ok) throw new Error(`Edit failed: ${response.statusText}`);
+      const result = await response.json();
+
+      if (result.status === 'success' && result.files?.length > 0) {
+        // Merge edited files back into artifacts
+        setArtifacts(prev => {
+          const updated = [...prev];
+          for (const editedFile of result.files) {
+            const idx = updated.findIndex(a => a.filename === editedFile.filename);
+            if (idx >= 0) {
+              updated[idx] = { filename: editedFile.filename, content: editedFile.content };
+            } else {
+              // New file added by the edit
+              updated.push({ filename: editedFile.filename, content: editedFile.content });
+            }
+          }
+          return updated;
+        });
+        // Clear selection, select first edited file
+        setCheckedFiles(new Set());
+        if (result.files.length > 0) {
+          setSelectedFile(result.files[0].filename);
+          setRightTab('code');
+        }
+        // Rebuild preview after edit
+        setArtifacts(prev => {
+          const rebuilt = buildPreviewFromArtifacts(prev);
+          if (rebuilt) setPreview(injectFetchInterceptor(rebuilt));
+          return prev;
+        });
+        setLogs(prev => [...prev, `[✏️] AI edited ${result.files.length} file(s) successfully`]);
+      } else {
+        setLogs(prev => [...prev, `[⚠️] Edit issue: ${result.message || 'Unknown error'}`]);
+      }
+    } catch (err: any) {
+      setLogs(prev => [...prev, `[ERROR] Edit failed: ${err.message}`]);
+    } finally {
+      setIsEditing(false);
+    }
+  }, [artifacts]);
+
+  const closeEditMode = useCallback(() => {
+    setEditMode(false);
+    setImageGenMode(false);
+    setCheckedFiles(new Set());
+    setSelectedElement(null);
+  }, []);
+
+  const closeImageGenMode = useCallback(() => {
+    setImageGenMode(false);
+    setSelectedElement(null);
+    if (rightTab === 'image-studio') setRightTab('preview');
+  }, [rightTab]);
+
+  const handleUpdateArtifacts = useCallback((newArtifacts: Artifact[]) => {
+    setArtifacts(newArtifacts);
+    // Rebuild preview with inlined CSS/JS
+    const newPreview = buildPreviewFromArtifacts(newArtifacts);
+    if (newPreview) setPreview(injectFetchInterceptor(newPreview));
+  }, [buildPreviewFromArtifacts, injectFetchInterceptor]);
+
+  // Get the files that are checked for editing
+  const selectedEditFiles = useMemo(() => {
+    return artifacts
+      .filter(a => checkedFiles.has(a.filename))
+      .map(a => ({ filename: a.filename, content: a.content }));
+  }, [artifacts, checkedFiles]);
   // ── DEPLOY ─────────────────────────────────────────────────────
   const deployCode = async () => {
     if (artifacts.length === 0 || !repoUrl) return;
@@ -610,26 +1073,99 @@ export default function Home() {
             files={allFileEntries}
             selectedFile={selectedFile}
             onSelectFile={(path) => { setSelectedFile(path); setRightTab('code'); }}
+            multiSelect={editMode}
+            checkedFiles={checkedFiles}
+            onToggleCheck={toggleFileCheck}
           />
+          {/* Edit mode toggle — only in results phase */}
+          {phase === 'results' && artifacts.length > 0 && (
+            <div className="border-t border-[#3c3c3c] p-2 space-y-1.5">
+              <button
+                onClick={() => {
+                  if (editMode) {
+                    closeEditMode();
+                  } else {
+                    setEditMode(true);
+                    setImageGenMode(false);
+                    setRightTab('preview'); // Show preview for visual element selection
+                    setSelectedElement(null);
+                  }
+                }}
+                className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[11px] font-bold tracking-wider transition-all ${
+                  editMode
+                    ? 'bg-[#c678dd]/20 text-[#c678dd] border border-[#c678dd]/40'
+                    : 'bg-[#252526] text-[#888] border border-[#3c3c3c] hover:border-[#c678dd]/40 hover:text-[#c678dd]'
+                }`}
+              >
+                <Wand2 className="w-3.5 h-3.5" />
+                {editMode ? 'EXIT EDIT MODE' : 'EDIT WITH AI'}
+              </button>
+              {editMode && checkedFiles.size > 0 && (
+                <p className="text-[9px] text-[#c678dd]/60 text-center mt-1">
+                  Select files &amp; describe changes below
+                </p>
+              )}
+              <button
+                onClick={() => {
+                  if (imageGenMode) {
+                    closeImageGenMode();
+                  } else {
+                    setImageGenMode(true);
+                    setEditMode(true);
+                    setRightTab('image-studio');
+                  }
+                }}
+                className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-[11px] font-bold tracking-wider transition-all ${
+                  imageGenMode
+                    ? 'bg-[#e8ab53]/20 text-[#e8ab53] border border-[#e8ab53]/40'
+                    : 'bg-[#252526] text-[#888] border border-[#3c3c3c] hover:border-[#e8ab53]/40 hover:text-[#e8ab53]'
+                }`}
+              >
+                <ImagePlus className="w-3.5 h-3.5" />
+                {imageGenMode ? 'EXIT STUDIO' : '🍌 NANO BANANA STUDIO'}
+              </button>
+            </div>
+          )}
         </div>
 
-        {/* ── RIGHT: CODE / TERMINAL / PREVIEW ─────────────────── */}
+        {/* ── RIGHT: CODE / TERMINAL / PREVIEW / CHECKPOINT ───── */}
         <div className="flex-1 flex flex-col overflow-hidden">
 
+          {/* Checkpoint panel — takes over the right side when active */}
+          {checkpointData && phase === 'building' ? (
+            <CheckpointPanel
+              checkpoint={checkpointData}
+              onContinue={handleCheckpointContinue}
+              onModify={handleCheckpointModify}
+              isResuming={isResuming}
+            />
+          ) : (
+          <>
           {/* Tab bar */}
           <div className="flex items-center bg-[#252526] border-b border-[#3c3c3c] flex-shrink-0">
             {([
-              { key: 'code' as const, label: selectedFile ? selectedFile.split('/').pop()! : 'Code', icon: null },
-              { key: 'terminal' as const, label: 'Terminal', icon: TerminalIcon },
-              { key: 'preview' as const, label: 'Preview', icon: Eye },
-            ] as const).map(({ key, label, icon: Icon }) => (
+              { key: 'code', label: selectedFile ? selectedFile.split('/').pop()! : 'Code', icon: null as any },
+              { key: 'terminal', label: 'Terminal', icon: TerminalIcon },
+              { key: 'preview', label: 'Preview', icon: Eye },
+              ...(phase === 'results' ? [{ key: 'image-studio', label: '🍌 Nano Banana', icon: ImagePlus }] : []),
+            ] as { key: 'code' | 'terminal' | 'preview' | 'image-studio'; label: string; icon: any }[]).map(({ key, label, icon: Icon }) => (
               <button
                 key={key}
-                onClick={() => setRightTab(key)}
+                onClick={() => {
+                  setRightTab(key);
+                  if (key === 'image-studio') {
+                    setImageGenMode(true);
+                    setEditMode(true);
+                  }
+                }}
                 className={`flex items-center gap-1.5 px-4 py-2 text-[12px] border-r border-[#3c3c3c] transition-colors
                   ${rightTab === key
-                    ? 'bg-[#1e1e1e] text-white border-b-2 border-b-[#007acc]'
-                    : 'bg-[#2d2d2d] text-[#888] hover:text-[#ccc]'}
+                    ? key === 'image-studio'
+                      ? 'bg-[#1e1e1e] text-[#e8ab53] border-b-2 border-b-[#e8ab53]'
+                      : 'bg-[#1e1e1e] text-white border-b-2 border-b-[#007acc]'
+                    : key === 'image-studio'
+                      ? 'bg-[#2d2d2d] text-[#e8ab53]/60 hover:text-[#e8ab53]'
+                      : 'bg-[#2d2d2d] text-[#888] hover:text-[#ccc]'}
                 `}
               >
                 {Icon && <Icon className="w-3.5 h-3.5" />}
@@ -642,6 +1178,9 @@ export default function Home() {
                 )}
                 {key === 'terminal' && isLoading && (
                   <Loader2 className="w-3 h-3 animate-spin text-[#39ff14] ml-1" />
+                )}
+                {key === 'image-studio' && (
+                  <span className="w-2 h-2 rounded-full bg-[#e8ab53] ml-1 animate-pulse" />
                 )}
               </button>
             ))}
@@ -707,17 +1246,58 @@ export default function Home() {
             {/* PREVIEW VIEW */}
             {rightTab === 'preview' && (
               preview ? (
-                <iframe srcDoc={preview} className="w-full h-full border-none bg-white" title="Preview" />
+                preview.startsWith('http') ? (
+                  <>
+                    <iframe src={preview} className="w-full h-full border-none bg-white" title="Preview" key={preview} />
+                    {editMode && (
+                      <div className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-[#252526]/95 backdrop-blur-sm border border-[#c678dd]/40 rounded-lg px-4 py-2 text-[11px] text-[#c678dd] flex items-center gap-2 z-10">
+                        <Wand2 className="w-3.5 h-3.5" />
+                        Live preview — select files from the tree and describe changes below
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    <iframe
+                      srcDoc={editMode ? injectSelectorScript(preview) : preview}
+                      className="w-full h-full border-none bg-white"
+                      title="Preview"
+                      key={editMode ? 'edit' : 'view'}
+                    />
+                    {editMode && (
+                      <div className="absolute top-2 right-2 bg-[#c678dd]/90 backdrop-blur-sm rounded-lg px-3 py-1.5 text-[10px] text-white font-bold tracking-wider flex items-center gap-1.5 z-10 pointer-events-none">
+                        {imageGenMode ? (
+                          <><ImagePlus className="w-3 h-3" /> CLICK IMAGE ELEMENTS TO REPLACE</>
+                        ) : (
+                          <><Wand2 className="w-3 h-3" /> CLICK ANY ELEMENT TO SELECT</>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )
               ) : (
                 <div className="flex items-center justify-center h-full text-[#6b6b6b]">
                   No preview available
                 </div>
               )
             )}
+
+            {/* IMAGE STUDIO VIEW */}
+            {rightTab === 'image-studio' && phase === 'results' && (
+              <div className="h-full overflow-auto">
+                <ImageGenPanel
+                  artifacts={artifacts}
+                  onUpdateArtifacts={handleUpdateArtifacts}
+                  selectedElement={selectedElement}
+                  onClearElement={() => setSelectedElement(null)}
+                  onClose={() => { closeImageGenMode(); setRightTab('preview'); }}
+                />
+              </div>
+            )}
           </div>
 
           {/* ── Review Panel (only shown when results phase) ────── */}
-          {phase === 'results' && !isLoading && (
+          {phase === 'results' && !isLoading && !editMode && (
             <ReviewPanel
               artifactCount={artifacts.length}
               status={buildStatus}
@@ -730,6 +1310,29 @@ export default function Home() {
             />
           )}
 
+          {/* ── Edit Panel (shown in edit mode) ────── */}
+          {phase === 'results' && editMode && !imageGenMode && (
+            <EditPanel
+              selectedFiles={selectedEditFiles}
+              onRemoveFile={(fn) => {
+                setCheckedFiles(prev => {
+                  const next = new Set(prev);
+                  next.delete(fn);
+                  return next;
+                });
+              }}
+              onSubmitEdit={handleSubmitEdit}
+              onClose={closeEditMode}
+              isEditing={isEditing}
+              selectedElement={selectedElement}
+              onClearElement={() => setSelectedElement(null)}
+            />
+          )}
+
+          {/* Image Gen Panel is now rendered as a right tab (image-studio) */}
+          </>
+          )}
+
           {/* Bottom status bar */}
           <div className="flex items-center justify-between px-4 py-1 bg-[#007acc] text-white text-[11px] flex-shrink-0">
             <div className="flex items-center gap-3">
@@ -740,8 +1343,9 @@ export default function Home() {
             </div>
             <div className="flex items-center gap-3">
               {isLoading && <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Building...</span>}
+              {isEditing && <span className="flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Editing...</span>}
               <span>
-                {phase === 'building' ? 'BUILDING...' : phase === 'results' ? 'REVIEW & REFINE' : ''}
+                {checkpointData ? `CHECKPOINT: ${checkpointData.title}` : imageGenMode ? 'IMAGE STUDIO — Click elements to target' : editMode ? `EDIT MODE — ${checkedFiles.size} file(s) selected` : phase === 'building' ? 'BUILDING...' : phase === 'results' ? 'REVIEW & REFINE' : ''}
               </span>
               <span>v11.0</span>
             </div>

@@ -2230,6 +2230,39 @@ except:
                 print(f"[*] Node.js Backend Live at: {backend_url}")
                 
                 # ═══════════════════════════════════════════════════════════
+                # POST-WRITE URL FIXUP: Replace ALL hardcoded localhost with real backend URL
+                # This catches cases where Gemini still hardcodes localhost despite prompts
+                # CRITICAL: Also updates file['content'] so downstream code reads fixed content
+                # ═══════════════════════════════════════════════════════════
+                import re as _re
+                print(f"[*] Fixing hardcoded localhost references in frontend files...")
+                url_fix_count = 0
+                for file in files:
+                    fname = file['filename']
+                    if any(fname.endswith(ext) for ext in ['.html', '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.mjs', '.cjs', '.css']):
+                        content = file['content']
+                        original_content = content
+                        # Replace ALL localhost/127.0.0.1 URLs with any port (8000, 5000, 3001, etc.)
+                        content = _re.sub(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)\b', backend_url, content)
+                        # Also replace quoted versions to handle edge cases
+                        content = _re.sub(r"'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)(/[^']*)?'", f"'{backend_url}\\1'", content)
+                        content = _re.sub(r'"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)(/[^"]*)?\"', f'"{backend_url}\\1"', content)
+                        content = _re.sub(r'`https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)', f'`{backend_url}', content)
+                        if content != original_content:
+                            # CRITICAL: Update file['content'] so downstream code sees fixed version
+                            file['content'] = content
+                            safe_fn = fname.lstrip('/')
+                            if safe_fn.startswith('..'):
+                                safe_fn = safe_fn.replace('..', '')
+                            try:
+                                self.sandbox.files.write(safe_fn, content)
+                                url_fix_count += 1
+                                print(f"  [*] Fixed URL in: {safe_fn}")
+                            except Exception as fix_err:
+                                print(f"  [!] Failed to fix URL in {safe_fn}: {fix_err}")
+                print(f"[*] URL fixup complete: {url_fix_count} files updated")
+                
+                # ═══════════════════════════════════════════════════════════
                 # COMPREHENSIVE FRONTEND/PROJECT DETECTION
                 # Detects: React, Vue, Next.js, Vite, Angular, Static HTML,
                 #          PHP, Flask templates, Django templates, and more
@@ -2509,6 +2542,38 @@ except Exception as e:
                 backend_url = f"https://{backend_host}"
                 print(f"[*] Backend Live at: {backend_url}")
 
+                # ═══════════════════════════════════════════════════════════
+                # POST-WRITE URL FIXUP: Replace ALL hardcoded localhost with real backend URL
+                # This catches cases where Gemini still hardcodes localhost despite prompts
+                # CRITICAL: Also updates file['content'] so downstream code reads fixed content
+                # ═══════════════════════════════════════════════════════════
+                import re as _re
+                print(f"[*] Fixing hardcoded localhost references in frontend files...")
+                url_fix_count = 0
+                for file in files:
+                    fname = file['filename']
+                    if any(fname.endswith(ext) for ext in ['.html', '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.mjs', '.cjs', '.css']):
+                        content = file['content']
+                        original_content = content
+                        # Replace ALL localhost/127.0.0.1 URLs with any port
+                        content = _re.sub(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)\b', backend_url, content)
+                        content = _re.sub(r"'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)(/[^']*)?'", f"'{backend_url}\\1'", content)
+                        content = _re.sub(r'"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)(/[^"]*)?\"', f'"{backend_url}\\1"', content)
+                        content = _re.sub(r'`https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)', f'`{backend_url}', content)
+                        if content != original_content:
+                            # CRITICAL: Update file['content'] so downstream code sees fixed version
+                            file['content'] = content
+                            safe_fn = fname.lstrip('/')
+                            if safe_fn.startswith('..'):
+                                safe_fn = safe_fn.replace('..', '')
+                            try:
+                                self.sandbox.files.write(safe_fn, content)
+                                url_fix_count += 1
+                                print(f"  [*] Fixed URL in: {safe_fn}")
+                            except Exception as fix_err:
+                                print(f"  [!] Failed to fix URL in {safe_fn}: {fix_err}")
+                print(f"[*] URL fixup complete: {url_fix_count} files updated")
+
                 # --- PHASE 2: FRONTEND LAUNCH (Dual Stack) ---
                 # Check for frontend: Next.js (package.json) OR static files (index.html)
                 # Detect BOTH frontend/ directory structure AND root-level frontend files
@@ -2574,6 +2639,33 @@ except Exception as e:
                         print("🎨 Detected Static Frontend (HTML/CSS/JS in frontend/ directory)...")
                     else:
                         print("🎨 Detected Static Frontend (HTML/CSS/JS at root level)...")
+                    
+                    # Inject window.__API_BASE_URL__ into all HTML files for static frontends
+                    # CRITICAL: file['content'] is already URL-fixed by the fixup step above
+                    print(f"[*] Injecting backend URL into static HTML files...")
+                    api_script_tag = f'<script>window.__API_BASE_URL__ = "{backend_url}";</script>'
+                    for file in files:
+                        if file['filename'].endswith('.html'):
+                            # Use the already-fixed content (file['content'] was updated in URL fixup)
+                            content = file['content']
+                            # Only inject if not already present
+                            if '__API_BASE_URL__' not in content or f'window.__API_BASE_URL__ = "{backend_url}"' not in content:
+                                if '<head>' in content:
+                                    content = content.replace('<head>', f'<head>\n{api_script_tag}', 1)
+                                elif '<body>' in content:
+                                    content = content.replace('<body>', f'<body>\n{api_script_tag}', 1)
+                                else:
+                                    content = api_script_tag + '\n' + content
+                            # Update file['content'] with the injected version
+                            file['content'] = content
+                            safe_fn = file['filename'].lstrip('/')
+                            if safe_fn.startswith('..'):
+                                safe_fn = safe_fn.replace('..', '')
+                            try:
+                                self.sandbox.files.write(safe_fn, content)
+                                print(f"  [*] Injected API URL into: {safe_fn}")
+                            except Exception as inj_err:
+                                print(f"  [!] Failed to inject into {safe_fn}: {inj_err}")
                     
                     # Verify files exist before starting server
                     try:
@@ -2643,7 +2735,7 @@ except Exception as e:
             return f"Sandbox Error: {str(e)}"
 
     def process_resurrection_stream(self, repo_url: str, instructions: str):
-        """Generator that yields logs and results in real-time."""
+        """Generator that yields logs and results in real-time with interactive checkpoints."""
         logs = []
         deep_scan_result = None  # Store deep scan for reuse
         
@@ -2700,6 +2792,22 @@ except Exception as e:
              fallback_mode = True
         else:
              fallback_mode = False
+        
+        # ═══════════════════════════════════════════════════════════
+        # CHECKPOINT 1: POST-PLAN — Let user review the plan
+        # ═══════════════════════════════════════════════════════════
+        yield {
+            "type": "checkpoint",
+            "id": "post_plan",
+            "title": "Modernization Plan Ready",
+            "description": "Review the AI-generated modernization plan before code generation begins.",
+            "data": {
+                "plan": plan,
+                "tech_stack": tech_stack,
+                "files_analyzed": files_analyzed,
+                "must_preserve": must_preserve[:20],
+            }
+        }
              
         yield emit_log("🏗️ Architecting Enhanced Blueprint (Preserving Core Logic)...")
 
@@ -2752,13 +2860,55 @@ except Exception as e:
                 yield emit_log(f"Generated {len(encoded_files)} System Modules...")
                 yield emit_log(f"📦 Detected Runtime: {runtime.upper()} | Entrypoint: {entrypoint}")
                 
+                # ═══════════════════════════════════════════════════════════
+                # CHECKPOINT 2: POST-CODEGEN — Let user review generated files
+                # ═══════════════════════════════════════════════════════════
+                yield {
+                    "type": "checkpoint",
+                    "id": "post_codegen",
+                    "title": "Code Generation Complete",
+                    "description": "Review the generated files before deploying to the sandbox. You can request changes or proceed.",
+                    "data": {
+                        "files": [{"filename": f['filename'], "preview": f['content'][:500]} for f in files],
+                        "file_count": len(files),
+                        "runtime": runtime,
+                        "entrypoint": entrypoint,
+                        "full_artifacts": files,
+                    }
+                }
+                
                 # 3. Execution
                 yield emit_log("Booting Neural Sandbox Environment...")
                 sandbox_logs = self.execute_in_sandbox(files, entrypoint, runtime, deep_scan_result)
                 yield emit_debug(f"[DEBUG] Sandbox Output:\n{sandbox_logs}")
                 
+                # Extract preview URL early for checkpoint
+                import re as _re
+                _url_match = _re.search(r"\[PREVIEW_URL\] (https://[^\s]+)", sandbox_logs or "")
+                _backend_match = _re.search(r"\[BACKEND_URL\] (https://[^\s]+)", sandbox_logs or "")
+                _preview_url = _url_match.group(1) if _url_match else ""
+                _backend_url = _backend_match.group(1) if _backend_match else ""
+                
                 # 4. Comprehensive Error Detection
                 error_detected, error_type, error_message = self._detect_errors(sandbox_logs)
+                
+                if not error_detected and _preview_url:
+                    # ═══════════════════════════════════════════════════════════
+                    # CHECKPOINT 3: POST-SANDBOX — Live preview for user review
+                    # ═══════════════════════════════════════════════════════════
+                    yield {
+                        "type": "checkpoint",
+                        "id": "post_sandbox",
+                        "title": "Live Preview Ready",
+                        "description": "Your modernized app is running! Review the live preview and request refinements if needed.",
+                        "data": {
+                            "preview_url": _preview_url,
+                            "backend_url": _backend_url,
+                            "file_count": len(files),
+                            "runtime": runtime,
+                            "status": "deployed",
+                        }
+                    }
                 
                 if error_detected:
                     all_errors.append({
@@ -2834,14 +2984,83 @@ except Exception as e:
              # Fallback: No URL found
              pass
         
-        # Check artifacts
+        # Check artifacts for preview content
+        # Priority: preview.html > index.html > any .html file
+        html_file = None
         for f in files:
-            if 'preview.html' in f['filename']:
-                # If we have a real URL, user defines if they want that or static HTML. 
-                # For now, let's prefer the Live Server URL if it exists!
-                if not preview.startswith("http"): 
-                    preview = f['content']
+            fname = f.get('filename', '').lower()
+            if 'preview.html' in fname:
+                html_file = f
                 break
+        if not html_file:
+            for f in files:
+                fname = f.get('filename', '').lower()
+                basename = fname.rsplit('/', 1)[-1] if '/' in fname else fname
+                if basename == 'index.html':
+                    html_file = f
+                    break
+        if not html_file:
+            for f in files:
+                fname = f.get('filename', '').lower()
+                if fname.endswith('.html') or fname.endswith('.htm'):
+                    html_file = f
+                    break
+        
+        if html_file and not preview.startswith("http"):
+            # Build a self-contained preview by inlining CSS and JS
+            preview_html = html_file['content']
+            
+            # Collect CSS and JS files for inlining
+            css_files = {}
+            js_files = {}
+            for f in files:
+                fn = f.get('filename', '')
+                fn_lower = fn.lower()
+                if fn_lower.endswith('.css'):
+                    # Map both full path and basename
+                    css_files[fn] = f['content']
+                    basename = fn.rsplit('/', 1)[-1] if '/' in fn else fn
+                    css_files[basename] = f['content']
+                elif fn_lower.endswith('.js') and not fn_lower.endswith('.json'):
+                    js_files[fn] = f['content']
+                    basename = fn.rsplit('/', 1)[-1] if '/' in fn else fn
+                    js_files[basename] = f['content']
+            
+            # Inline CSS: replace <link rel="stylesheet" href="..."> with <style>...</style>
+            import re as _re
+            def _inline_css(match):
+                href = match.group(1) or match.group(2) or ''
+                # Try to find the CSS file
+                basename = href.rsplit('/', 1)[-1] if '/' in href else href
+                css_content = css_files.get(href) or css_files.get(basename) or css_files.get('./' + href)
+                if css_content:
+                    return f'<style>\n{css_content}\n</style>'
+                return match.group(0)  # Keep original if not found
+            
+            preview_html = _re.sub(
+                r'<link[^>]*rel=["\']stylesheet["\'][^>]*href=["\']([^"\'>]+)["\'][^>]*/?>|<link[^>]*href=["\']([^"\'>]+)["\'][^>]*rel=["\']stylesheet["\'][^>]*/?>',
+                _inline_css,
+                preview_html,
+                flags=_re.IGNORECASE
+            )
+            
+            # Inline JS: replace <script src="..."> with <script>...</script>
+            def _inline_js(match):
+                src = match.group(1)
+                basename = src.rsplit('/', 1)[-1] if '/' in src else src
+                js_content = js_files.get(src) or js_files.get(basename) or js_files.get('./' + src)
+                if js_content:
+                    return f'<script>\n{js_content}\n</script>'
+                return match.group(0)  # Keep original if not found
+            
+            preview_html = _re.sub(
+                r'<script[^>]*src=["\']([^"\'>]+)["\'][^>]*>\s*</script>',
+                _inline_js,
+                preview_html,
+                flags=_re.IGNORECASE
+            )
+            
+            preview = preview_html
         
         # Determine Status
         status = "Resurrected"
@@ -2849,6 +3068,34 @@ except Exception as e:
             status = "Fallback"
         elif preview.startswith("http"):
             status = "Resurrected"  # Successfully got live URLs
+        
+        # ═══════════════════════════════════════════════════════════
+        # FINAL SAFETY NET: Remove ANY remaining localhost URLs from artifacts
+        # This is the last-chance catch for any URLs that slipped through
+        # ═══════════════════════════════════════════════════════════
+        if preview.startswith("http"):
+            # Extract backend URL from preview or BACKEND_URL marker
+            _backend_url_final = ""
+            _bu_match = re.search(r"\[BACKEND_URL\] (https://[^\s]+)", sandbox_logs or "")
+            if _bu_match:
+                _backend_url_final = _bu_match.group(1)
+            elif preview.startswith("http"):
+                # For single-stack, the preview IS the backend
+                _backend_url_final = preview.rstrip('/')
+            
+            if _backend_url_final:
+                _localhost_pattern = re.compile(r'https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(?:8000|5000|3001|8080|5001|4000)\b')
+                _fix_final_count = 0
+                for f in files:
+                    fname = f.get('filename', '')
+                    if any(fname.endswith(ext) for ext in ['.html', '.js', '.jsx', '.ts', '.tsx', '.vue', '.svelte', '.mjs', '.cjs']):
+                        original = f['content']
+                        fixed = _localhost_pattern.sub(_backend_url_final, original)
+                        if fixed != original:
+                            f['content'] = fixed
+                            _fix_final_count += 1
+                if _fix_final_count > 0:
+                    yield {"type": "log", "content": f"🔒 Final safety net: fixed {_fix_final_count} remaining localhost reference(s)"}
         
         # Final Result
         yield {
