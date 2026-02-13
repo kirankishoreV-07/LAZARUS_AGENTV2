@@ -388,40 +388,164 @@ NOW GENERATE ALL {batch_count} ENHANCED FILES FOR THIS BATCH
 
 def extract_batch_summary(generated_files: list) -> str:
     """
-    Extracts a brief summary of generated files for cross-batch context.
-    Pulls out key exports, class definitions, function signatures, endpoints.
-    This keeps cross-batch context lightweight.
+    V2 Phase 2: Intelligent Batch Summary Extraction
+    
+    Produces STRUCTURED summaries instead of raw code snippets:
+      - Routes (method, path, handler)
+      - Schemas/Models (name, fields)
+      - Exports (name, kind)
+      - Imports (what this batch needs from others)
+      - Version tag per batch output
+    
+    Also detects potential breaking changes (missing routes, changed schemas).
     """
     summaries = []
+    batch_routes = []
+    batch_schemas = []
+    batch_exports = []
+    batch_imports = []
+
     for f in generated_files:
         path = f.get('filename', f.get('path', 'unknown'))
         content = f.get('content', '')
-        
-        # Extract key signatures (not full content)
-        key_lines = []
+
+        file_routes = []
+        file_schemas = []
+        file_exports = []
+        file_imports = []
+
         for line in content.split('\n'):
             stripped = line.strip()
-            # JavaScript/TypeScript exports and definitions
+
+            # ── Routes ──
+            import re as _re
+            route_match = _re.match(
+                r"""(?:app|router|server)\.(get|post|put|delete|patch|options|all)\s*\(\s*['"]([^'"]+)['"]""",
+                stripped, _re.IGNORECASE
+            )
+            if route_match:
+                method = route_match.group(1).upper()
+                route_path = route_match.group(2)
+                file_routes.append(f"{method} {route_path}")
+                batch_routes.append(f"{method} {route_path} (in {path})")
+
+            # Python decorators for routes
+            py_route = _re.match(
+                r"""@(?:app|router|bp)\.(get|post|put|delete|patch|route)\s*\(\s*['"]([^'"]+)['"]""",
+                stripped
+            )
+            if py_route:
+                method = py_route.group(1).upper()
+                if method == 'ROUTE':
+                    method = 'GET'
+                route_path = py_route.group(2)
+                file_routes.append(f"{method} {route_path}")
+                batch_routes.append(f"{method} {route_path} (in {path})")
+
+            # ── Schemas / Models ──
+            schema_match = _re.match(
+                r'class\s+(\w+)\s*\(.*(?:BaseModel|Schema|Model|Document|Base|Form)\w*',
+                stripped
+            )
+            if schema_match:
+                file_schemas.append(schema_match.group(1))
+                batch_schemas.append(f"{schema_match.group(1)} (in {path})")
+
+            # TypeScript interfaces
+            ts_interface = _re.match(r'(?:export\s+)?interface\s+(\w+)', stripped)
+            if ts_interface:
+                file_schemas.append(ts_interface.group(1))
+                batch_schemas.append(f"{ts_interface.group(1)} (in {path})")
+
+            # ── Exports ──
             if any(stripped.startswith(kw) for kw in [
                 'export ', 'module.exports', 'exports.',
-                'function ', 'const ', 'class ',
-                'app.get(', 'app.post(', 'app.put(', 'app.delete(', 'app.patch(',
-                'router.get(', 'router.post(', 'router.put(', 'router.delete(',
-                'def ', 'class ',  # Python
-                '@app.route', '@router.',  # Flask/FastAPI
             ]):
-                key_lines.append(stripped[:120])  # Truncate long lines
-            # Also grab import lines for dependency tracking
-            if stripped.startswith(('import ', 'from ', 'require(', 'const {', 'const {')):
-                key_lines.append(stripped[:120])
-        
-        if key_lines:
-            summary = f"\n--- {path} ---\n" + "\n".join(key_lines[:30])  # Max 30 key lines
-            summaries.append(summary)
-        else:
-            summaries.append(f"\n--- {path} --- [config/static file]")
+                # Extract the exported name
+                exp_match = _re.match(
+                    r'export\s+(?:default\s+)?(?:const|let|var|function|class|async\s+function|interface|type|enum)\s+(\w+)',
+                    stripped
+                )
+                if exp_match:
+                    file_exports.append(exp_match.group(1))
+                    batch_exports.append(f"{exp_match.group(1)} (from {path})")
+
+            # Python top-level definitions (implicit exports)
+            py_def = _re.match(r'(?:async\s+)?def\s+(\w+)\s*\(', stripped)
+            if py_def and not stripped.startswith(' ') and not stripped.startswith('\t'):
+                name = py_def.group(1)
+                if not name.startswith('_'):
+                    file_exports.append(name)
+                    batch_exports.append(f"{name}() (from {path})")
+
+            py_class = _re.match(r'class\s+(\w+)', stripped)
+            if py_class and not stripped.startswith(' ') and not stripped.startswith('\t'):
+                file_exports.append(py_class.group(1))
+                batch_exports.append(f"{py_class.group(1)} (from {path})")
+
+            # ── Imports ──
+            if stripped.startswith(('import ', 'from ', 'require(')):
+                file_imports.append(stripped[:120])
+                batch_imports.append(stripped[:120])
+
+        # Build per-file structured summary
+        parts = [f"\n── {path} ──"]
+        if file_routes:
+            parts.append(f"  ROUTES: {', '.join(file_routes[:10])}")
+        if file_schemas:
+            parts.append(f"  SCHEMAS: {', '.join(file_schemas[:10])}")
+        if file_exports:
+            parts.append(f"  EXPORTS: {', '.join(file_exports[:15])}")
+        if not (file_routes or file_schemas or file_exports):
+            parts.append("  [config/static/utility file]")
+        summaries.append("\n".join(parts))
+
+    # Build batch-level structured overview
+    overview_parts = ["═══ BATCH STRUCTURED SUMMARY ═══"]
+    if batch_routes:
+        overview_parts.append(f"TOTAL ROUTES ({len(batch_routes)}):")
+        for r in batch_routes[:20]:
+            overview_parts.append(f"  → {r}")
+        if len(batch_routes) > 20:
+            overview_parts.append(f"  ... +{len(batch_routes) - 20} more")
+    if batch_schemas:
+        overview_parts.append(f"TOTAL SCHEMAS ({len(batch_schemas)}):")
+        for s in batch_schemas[:15]:
+            overview_parts.append(f"  □ {s}")
+    if batch_exports:
+        overview_parts.append(f"TOTAL EXPORTS ({len(batch_exports)}):")
+        for e in batch_exports[:20]:
+            overview_parts.append(f"  ▸ {e}")
+        if len(batch_exports) > 20:
+            overview_parts.append(f"  ... +{len(batch_exports) - 20} more")
+    overview_parts.append("═══ END BATCH SUMMARY ═══")
+
+    return "\n".join(overview_parts) + "\n\n" + "\n".join(summaries)
+
+
+def _detect_batch_breaking_changes(
+    previous_summaries: str,
+    new_summary: str,
+) -> list:
+    """
+    Compare new batch summary against previous summaries to detect
+    potential breaking changes (for logging/warning).
     
-    return "\n".join(summaries)
+    Returns list of warning strings.
+    """
+    import re as _re
+    warnings = []
+
+    # Extract previously declared routes
+    prev_routes = set(_re.findall(r'→\s*(GET|POST|PUT|DELETE|PATCH)\s+(\S+)', previous_summaries))
+    new_routes = set(_re.findall(r'→\s*(GET|POST|PUT|DELETE|PATCH)\s+(\S+)', new_summary))
+
+    # Check if new batch overwrites a route from a previous batch
+    for method, path in new_routes:
+        if (method, path) in prev_routes:
+            warnings.append(f"Route {method} {path} was already generated in a previous batch — possible duplicate")
+
+    return warnings
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

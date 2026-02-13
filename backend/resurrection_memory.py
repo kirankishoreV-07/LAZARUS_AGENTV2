@@ -46,7 +46,7 @@ def load_memory(repo_url: str) -> Dict:
     return create_empty_memory(repo_url)
 
 def create_empty_memory(repo_url: str) -> Dict:
-    """Create a new empty memory structure."""
+    """Create a new empty memory structure (V2 Phase 2 Enhanced)."""
     return {
         "repo_url": repo_url,
         "repo_id": get_repo_id(repo_url),
@@ -85,7 +85,38 @@ def create_empty_memory(repo_url: str) -> Dict:
         },
         
         # Resurrection History
-        "resurrection_history": []
+        "resurrection_history": [],
+        
+        # ═══════════════════════════════════════════════════════════
+        # PHASE 2 (V3): Enhanced Memory Fields
+        # ═══════════════════════════════════════════════════════════
+        
+        # Dependency Graph Snapshot — stored per resurrection
+        "dependency_graph_snapshot": None,  # {nodes_count, edges_count, foundation_files, circular_deps}
+        
+        # API Contract Registry — full route map from last successful run
+        "api_contracts": [],  # [{method, path, handler, file, auth_required, body_schema, return_type}]
+        
+        # Schema Registry — data models from last successful run
+        "schema_registry": [],  # [{name, kind, fields, file}]
+        
+        # Critical Patterns — rules the AI discovered work for this repo
+        "critical_patterns": [],  # ["always validate email before save", ...]
+        
+        # Package Version Constraints — what version combos work
+        "package_versions": {},  # {"react": "18.2.0", "fastapi": "0.104.1"}
+        
+        # Cross-Batch Context (from last successful run)
+        "cross_batch_context": None,  # Serialized CrossBatchContextManager data
+        
+        # Breaking Changes History — tracks what broke between batches
+        "breaking_changes_history": [],  # [{kind, description, batch_id, severity, timestamp}]
+        
+        # Auth Patterns — detected auth mechanisms
+        "auth_patterns": [],  # [{kind, file, details, middleware_name}]
+        
+        # Env Vars Required — what the project needs
+        "env_vars_required": [],  # [(name, category)]
     }
 
 def save_memory(repo_url: str, memory: Dict) -> bool:
@@ -336,3 +367,195 @@ def clear_memory(repo_url: str) -> bool:
             return False
     
     return True
+
+
+# ══════════════════════════════════════════════════════════════
+# PHASE 2 (V3): Enhanced Memory Recording Functions
+# ══════════════════════════════════════════════════════════════
+
+def record_dependency_graph(repo_url: str, dep_graph_summary: Dict) -> None:
+    """
+    Save a snapshot of the dependency graph for this repo.
+    Next resurrection can use this to detect structural changes.
+    
+    Args:
+        dep_graph_summary: {
+            'nodes_count': int, 'edges_count': int,
+            'foundation_files': [str], 'circular_deps': [[str]],
+            'topo_layers': int
+        }
+    """
+    memory = load_memory(repo_url)
+    memory["dependency_graph_snapshot"] = {
+        "timestamp": datetime.now().isoformat(),
+        **dep_graph_summary
+    }
+    save_memory(repo_url, memory)
+
+
+def record_api_contracts(repo_url: str, contracts: List) -> None:
+    """
+    Save the full API contract registry from the context extractor.
+    
+    Args:
+        contracts: List of dicts with method, path, handler, file, auth_required, etc.
+    """
+    memory = load_memory(repo_url)
+    memory["api_contracts"] = contracts[-100:]  # Keep last 100 contracts
+    save_memory(repo_url, memory)
+
+
+def record_schema_registry(repo_url: str, schemas: List) -> None:
+    """
+    Save the schema registry from the context extractor.
+    
+    Args:
+        schemas: List of dicts with name, kind, fields, file.
+    """
+    memory = load_memory(repo_url)
+    memory["schema_registry"] = schemas[-50:]  # Keep last 50 schemas
+    save_memory(repo_url, memory)
+
+
+def record_critical_pattern(repo_url: str, pattern: str) -> None:
+    """
+    Record a critical pattern discovered during resurrection.
+    e.g. "always validate email before save", "auth middleware runs before every /api route"
+    """
+    memory = load_memory(repo_url)
+    if "critical_patterns" not in memory:
+        memory["critical_patterns"] = []
+    if pattern not in memory["critical_patterns"]:
+        memory["critical_patterns"].append(pattern)
+    # Keep last 30
+    memory["critical_patterns"] = memory["critical_patterns"][-30:]
+    save_memory(repo_url, memory)
+
+
+def record_package_versions(repo_url: str, versions: Dict) -> None:
+    """
+    Save discovered package version constraints.
+    
+    Args:
+        versions: {"react": "18.2.0", "fastapi": "0.104.1", ...}
+    """
+    memory = load_memory(repo_url)
+    if "package_versions" not in memory:
+        memory["package_versions"] = {}
+    memory["package_versions"].update(versions)
+    save_memory(repo_url, memory)
+
+
+def record_cross_batch_context(repo_url: str, context_data: Dict) -> None:
+    """
+    Save the cross-batch context manager state from a successful resurrection.
+    This allows the next resurrection to start with learned batch structures.
+    """
+    memory = load_memory(repo_url)
+    memory["cross_batch_context"] = {
+        "timestamp": datetime.now().isoformat(),
+        **context_data
+    }
+    save_memory(repo_url, memory)
+
+
+def record_breaking_changes(repo_url: str, changes: List[Dict]) -> None:
+    """
+    Record breaking changes detected during batch generation.
+    """
+    memory = load_memory(repo_url)
+    if "breaking_changes_history" not in memory:
+        memory["breaking_changes_history"] = []
+    for change in changes:
+        change["timestamp"] = datetime.now().isoformat()
+        memory["breaking_changes_history"].append(change)
+    # Keep last 30
+    memory["breaking_changes_history"] = memory["breaking_changes_history"][-30:]
+    save_memory(repo_url, memory)
+
+
+def record_auth_patterns(repo_url: str, patterns: List[Dict]) -> None:
+    """Save detected auth patterns."""
+    memory = load_memory(repo_url)
+    memory["auth_patterns"] = patterns[-10:]  # Keep last 10
+    save_memory(repo_url, memory)
+
+
+def record_env_vars(repo_url: str, env_vars: List) -> None:
+    """Save required environment variables."""
+    memory = load_memory(repo_url)
+    memory["env_vars_required"] = env_vars[-50:]  # Keep last 50
+    save_memory(repo_url, memory)
+
+
+def get_enhanced_memory_context(repo_url: str) -> str:
+    """
+    Phase 2 Enhanced: Generate a rich context string from memory.
+    Includes API contracts, schemas, critical patterns, and cross-batch data.
+    This replaces get_memory_context_for_prompt for Phase 2.
+    """
+    memory = load_memory(repo_url)
+    
+    # If no past resurrections, return empty
+    if memory["total_attempts"] == 0:
+        return ""
+    
+    context = get_memory_context_for_prompt(repo_url)
+    
+    # ── Phase 2 enrichments ──
+    
+    # API contracts from last run
+    contracts = memory.get("api_contracts", [])
+    if contracts:
+        context += "\n\n🔌 REMEMBERED API CONTRACTS (from last successful resurrection):\n"
+        for c in contracts[:20]:
+            auth = " [AUTH]" if c.get("auth_required") else ""
+            body = f" body={c.get('body_schema')}" if c.get('body_schema') else ""
+            context += f"   {c.get('method', '?')} {c.get('path', '?')}{auth}{body} → {c.get('handler', '?')}() in {c.get('file', '?')}\n"
+        if len(contracts) > 20:
+            context += f"   ... +{len(contracts) - 20} more routes\n"
+    
+    # Schema registry
+    schemas = memory.get("schema_registry", [])
+    if schemas:
+        context += "\n📊 REMEMBERED DATA SCHEMAS:\n"
+        for s in schemas[:15]:
+            fields_str = ", ".join(f"{f[0]}: {f[1]}" for f in s.get("fields", [])[:5])
+            context += f"   {s.get('name', '?')} ({s.get('kind', '?')}) {{ {fields_str} }}\n"
+    
+    # Critical patterns
+    patterns = memory.get("critical_patterns", [])
+    if patterns:
+        context += "\n🎯 CRITICAL PATTERNS (learned from past runs):\n"
+        for p in patterns:
+            context += f"   • {p}\n"
+    
+    # Package versions
+    versions = memory.get("package_versions", {})
+    if versions:
+        context += "\n📦 KNOWN WORKING PACKAGE VERSIONS:\n"
+        for pkg, ver in list(versions.items())[:20]:
+            context += f"   {pkg}: {ver}\n"
+    
+    # Breaking changes
+    breaking = memory.get("breaking_changes_history", [])
+    if breaking:
+        context += "\n⚠ PAST BREAKING CHANGES (avoid repeating these):\n"
+        for bc in breaking[-5:]:
+            context += f"   [{bc.get('severity', '?').upper()}] {bc.get('description', '?')}\n"
+    
+    # Auth patterns
+    auth = memory.get("auth_patterns", [])
+    if auth:
+        context += "\n🔐 AUTH PATTERNS:\n"
+        for a in auth:
+            context += f"   {a.get('kind', '?').upper()}: {a.get('details', '?')} (in {a.get('file', '?')})\n"
+    
+    # Env vars
+    env_vars = memory.get("env_vars_required", [])
+    if env_vars:
+        context += "\n🔑 REQUIRED ENVIRONMENT VARIABLES:\n"
+        for name, cat in env_vars[:20]:
+            context += f"   {name} ({cat})\n"
+    
+    return context

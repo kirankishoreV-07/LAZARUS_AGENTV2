@@ -16,7 +16,13 @@ from prompts import (
 from resurrection_memory import (
     load_memory, record_attempt_start, record_failure, 
     record_success, record_dependency_issue, record_decision,
-    get_memory_context_for_prompt, get_memory_summary
+    get_memory_context_for_prompt, get_memory_summary,
+    # Phase 2 enhanced memory functions
+    record_dependency_graph, record_api_contracts, record_schema_registry,
+    record_critical_pattern, record_package_versions,
+    record_cross_batch_context, record_breaking_changes,
+    record_auth_patterns, record_env_vars,
+    get_enhanced_memory_context,
 )
 
 # ══ Phase 1 (V3) Imports: Async I/O, AST Parser, Dependency Graph ══
@@ -26,6 +32,11 @@ from dependency_graph import (
     build_dependency_graph, create_smart_batches,
     generate_batch_context, DependencyGraph, Batch
 )
+
+# ══ Phase 2 (V3) Imports: Context Intelligence ══
+from context_extraction import extract_project_context, ProjectContext
+from context_manager import CrossBatchContextManager
+from post_validators import run_all_validations, ValidationReport
 
 
 class GeminiAPIError(Exception):
@@ -661,6 +672,54 @@ This PR contains the **completely modernized** version of your legacy codebase.
                 _add_debug_log('WARNING', 'AST_ANALYSIS', f'AST analysis failed: {ast_err}', {})
                 result["_ast_analyses"] = {}
                 result["_dep_graph"] = None
+            
+            # ═══════════════════════════════════════════════════════════
+            # PHASE 2 (V3): RICH CONTEXT EXTRACTION
+            # Extracts API contracts, schemas, auth patterns, data flows
+            # ═══════════════════════════════════════════════════════════
+            
+            try:
+                ast_analyses = result.get("_ast_analyses", {})
+                if ast_analyses:
+                    ctx_start = time.time()
+                    
+                    # Build file content dict for deeper regex passes
+                    file_contents = {f["path"]: f["content"] for f in result["files"]}
+                    
+                    project_context = extract_project_context(ast_analyses, file_contents)
+                    
+                    ctx_elapsed = time.time() - ctx_start
+                    print(f"[*] 🔬 Phase 2 Context Extraction: {len(project_context.api_contracts)} APIs, "
+                          f"{len(project_context.schemas)} schemas, {len(project_context.auth_patterns)} auth patterns "
+                          f"in {ctx_elapsed:.1f}s")
+                    _add_debug_log('INFO', 'CONTEXT_EXTRACT', 
+                        f'Phase 2: {len(project_context.api_contracts)} APIs, '
+                        f'{len(project_context.schemas)} schemas, '
+                        f'{len(project_context.auth_patterns)} auth, '
+                        f'{len(project_context.env_vars_required)} env vars', {
+                        'api_count': len(project_context.api_contracts),
+                        'schema_count': len(project_context.schemas),
+                        'auth_count': len(project_context.auth_patterns),
+                        'env_count': len(project_context.env_vars_required),
+                        'flow_count': len(project_context.data_flows),
+                    })
+                    
+                    # Attach to result for downstream use
+                    result["_project_context"] = project_context
+                    
+                    # Also enrich the flat fields from context extraction
+                    for contract in project_context.api_contracts:
+                        ep_str = f"{contract.method} {contract.path} ({contract.handler})"
+                        if ep_str not in result["api_endpoints"]:
+                            result["api_endpoints"].append(ep_str)
+                    
+                else:
+                    result["_project_context"] = None
+                    
+            except Exception as ctx_err:
+                print(f"[!] Phase 2 context extraction failed (non-fatal): {ctx_err}")
+                _add_debug_log('WARNING', 'CONTEXT_EXTRACT', f'Context extraction failed: {ctx_err}', {})
+                result["_project_context"] = None
             
             total_blobs = len([i for i in tree if i['type'] == 'blob'])
             print(f"[*] Deep scan complete: {files_fetched}/{total_blobs} files analyzed")
@@ -1938,14 +1997,27 @@ Group the files into batches for processing."""
                 })
                 return self.generate_code(plan, deep_scan_result, repo_url)
         
-        # Load memory context
+        # Load memory context (Phase 2: use enhanced memory if available)
         memory_context = ""
         if repo_url:
-            memory_context = get_memory_context_for_prompt(repo_url)
+            enhanced_ctx = get_enhanced_memory_context(repo_url)
+            if enhanced_ctx and len(enhanced_ctx) > 100:
+                memory_context = enhanced_ctx
+            else:
+                memory_context = get_memory_context_for_prompt(repo_url)
         
         # V3: Extract AST analyses and dependency graph from deep scan result
         ast_analyses = deep_scan_result.get("_ast_analyses", {})
         dep_graph = deep_scan_result.get("_dep_graph", None)
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PHASE 2 (V3): Cross-Batch Context Manager initialization
+        # Maintains project-wide context so no batch loses sight of the whole
+        # ═══════════════════════════════════════════════════════════════
+        project_context = deep_scan_result.get("_project_context", None)
+        cross_batch_mgr = CrossBatchContextManager(project_context=project_context)
+        print(f"[BATCH] 🔬 Phase 2 CrossBatchContextManager initialized"
+              f"{' (with project context)' if project_context else ' (no project context)'}") 
         
         # Group files into batches (V3: uses dependency graph when available)
         batches = self._group_files_into_batches(files, plan, dep_graph=dep_graph, ast_analyses=ast_analyses)
@@ -2009,6 +2081,24 @@ Group the files into batches for processing."""
                 prompt = prompt + context_injection
                 print(f"[BATCH {batch_idx+1}] Injected {len(smart_context):,} chars of V3 structural context")
             
+            # ═══════════════════════════════════════════════════════════
+            # PHASE 2 (V3): Cross-Batch Context Injection
+            # Injects project-wide contracts, previous batch summaries,
+            # dependency alerts, and breaking change warnings
+            # ═══════════════════════════════════════════════════════════
+            batch_file_paths = [f["path"] for f in batch_files]
+            phase2_context = cross_batch_mgr.prepare_batch_context(
+                batch_idx=batch_idx,
+                batch_file_paths=batch_file_paths
+            )
+            if phase2_context:
+                prompt = prompt + "\n\n" + phase2_context
+                print(f"[BATCH {batch_idx+1}] 🔬 Phase 2 context injected: {len(phase2_context):,} chars")
+                _add_debug_log('DEBUG', 'BATCH_CONTEXT', 
+                    f'Phase 2 context for batch {batch_idx+1}: {len(phase2_context)} chars', {
+                    'breaking_changes': len(cross_batch_mgr.breaking_changes)
+                })
+            
             # Call Gemini for this batch
             print(f"[BATCH {batch_idx+1}] Prompt size: {len(prompt):,} chars")
             _add_debug_log('DEBUG', 'BATCH', f'Batch {batch_idx+1} prompt size: {len(prompt):,} chars', {})
@@ -2048,6 +2138,21 @@ Group the files into batches for processing."""
             if batch_generated:
                 batch_summary = extract_batch_summary(batch_generated)
                 previously_generated_summaries += f"\n\n=== Batch {batch_idx+1}: {batch_name} ===\n{batch_summary}"
+                
+                # Phase 2: Record batch output in CrossBatchContextManager
+                # This feeds structured summaries + breaking change detection
+                try:
+                    cross_batch_mgr.record_batch_output(
+                        batch_index=batch_idx,
+                        batch_name=batch_name,
+                        generated_files=batch_generated,
+                        original_files=[f["path"] for f in batch_files]
+                    )
+                    bc_count = len(cross_batch_mgr.breaking_changes)
+                    if bc_count > 0:
+                        print(f"[BATCH {batch_idx+1}] ⚠️ Phase 2 detected {bc_count} breaking change(s)")
+                except Exception as cbm_err:
+                    print(f"[BATCH {batch_idx+1}] Phase 2 record_batch_output warning: {cbm_err}")
             
             # Rate limit protection: wait between batches
             # Gemini 3 Flash = 2K RPM → 1s is safe. Use 2s every 5th batch for burst safety.
@@ -2138,9 +2243,92 @@ Group the files into batches for processing."""
         if not all_generated_files:
             raise Exception("BATCH GENERATION FAILED: No files were generated across all batches. The Gemini API may be overloaded — try again in a minute.")
         
+        # ═══════════════════════════════════════════════════════════════════
+        # PHASE 2 (V3): POST-GENERATION VALIDATION
+        # Validates route coherence, dependency completeness, type matching
+        # ═══════════════════════════════════════════════════════════════════
+        try:
+            project_ctx = deep_scan_result.get("_project_context", None)
+            original_files = deep_scan_result.get("files", [])
+            
+            validation_report = run_all_validations(
+                generated_files=all_generated_files,
+                project_context=project_ctx,
+                original_files=original_files,
+            )
+            
+            # Store for memory and potential recovery
+            self._last_validation_report = validation_report
+            
+            print(f"\n[VALIDATE] {validation_report.summary()}")
+            _add_debug_log('INFO', 'VALIDATE', validation_report.summary()[:500], {
+                'route_mismatches': validation_report.route_mismatches,
+                'missing_deps': validation_report.missing_deps,
+                'type_mismatches': validation_report.type_mismatches,
+                'total_issues': validation_report.total_issues,
+            })
+            
+            if progress_callback:
+                if validation_report.total_issues == 0:
+                    progress_callback("✅ Post-generation validation: all checks passed")
+                else:
+                    progress_callback(f"⚠️ Validation: {validation_report.total_issues} issue(s) — {validation_report.route_mismatches} route, {validation_report.missing_deps} dep, {validation_report.type_mismatches} type")
+            
+            # If we have critical issues and a fix window, attempt auto-fix
+            if validation_report.has_critical and len(validation_report.issues) <= 10:
+                fix_prompt = validation_report.prompt_injection()
+                if fix_prompt and progress_callback:
+                    progress_callback("🔧 Attempting auto-fix for critical validation issues...")
+                
+                # Identify files needing fixes
+                files_needing_fix = set()
+                for issue in validation_report.issues:
+                    if issue.severity == 'critical' and issue.file:
+                        files_needing_fix.add(issue.file)
+                
+                if files_needing_fix:
+                    fix_file_dicts = [f for f in all_generated_files if f.get('filename') in files_needing_fix]
+                    if fix_file_dicts:
+                        fix_batch_prompt = get_batch_code_generation_prompt(
+                            plan=plan,
+                            batch_files=[{"path": f["filename"], "content": f["content"]} for f in fix_file_dicts],
+                            batch_index=len(batches),
+                            total_batches=len(batches) + 1,
+                            batch_name="Validation Fix",
+                            all_file_paths=all_file_paths,
+                            previously_generated_summaries=previously_generated_summaries,
+                            memory_context="",
+                        )
+                        fix_batch_prompt += "\n\n" + fix_prompt
+                        
+                        time.sleep(1)
+                        try:
+                            fix_response = self._call_gemini(fix_batch_prompt, model=self.coder_model)
+                            if fix_response and "[ERROR]" not in fix_response:
+                                fixed_files = self._parse_files_from_response(fix_response)
+                                if fixed_files:
+                                    # Replace the fixed files in the output
+                                    fixed_names = {f["filename"] for f in fixed_files}
+                                    all_generated_files = [f for f in all_generated_files if f["filename"] not in fixed_names]
+                                    all_generated_files.extend(fixed_files)
+                                    print(f"[VALIDATE] 🔧 Auto-fixed {len(fixed_files)} files")
+                                    _add_debug_log('INFO', 'VALIDATE', f'Auto-fixed {len(fixed_files)} files', {
+                                        'fixed': [f["filename"] for f in fixed_files]
+                                    })
+                        except Exception as fix_err:
+                            print(f"[VALIDATE] Auto-fix attempt failed (non-fatal): {fix_err}")
+                            
+        except Exception as val_err:
+            print(f"[!] Post-generation validation warning (non-fatal): {val_err}")
+            _add_debug_log('WARNING', 'VALIDATE', f'Validation failed: {val_err}', {})
+            self._last_validation_report = None
+        
         # Detect entrypoint and runtime
         entrypoint, runtime = self._detect_entrypoint_and_runtime(all_generated_files)
         print(f"[BATCH] Smart Detection: Runtime={runtime}, Entrypoint={entrypoint}")
+        
+        # Phase 2: Stash the cross-batch manager for memory saving later
+        self._last_cross_batch_mgr = cross_batch_mgr
         
         return {
             "files": all_generated_files,
@@ -3102,6 +3290,25 @@ except Exception as e:
                 # ═══════════════════════════════════════════════════════════
                 # CHECKPOINT 2: POST-CODEGEN — Let user review generated files
                 # ═══════════════════════════════════════════════════════════
+                
+                # Phase 2: Include validation results in checkpoint
+                validation_data = {}
+                if hasattr(self, '_last_validation_report') and self._last_validation_report:
+                    vr = self._last_validation_report
+                    validation_data = {
+                        "total_issues": vr.total_issues,
+                        "route_mismatches": vr.route_mismatches,
+                        "missing_deps": vr.missing_deps,
+                        "type_mismatches": vr.type_mismatches,
+                        "has_critical": vr.has_critical,
+                        "summary": vr.summary(),
+                        "issues": [
+                            {"severity": i.severity, "category": i.category, 
+                             "message": i.message, "file": i.file, "fix": i.fix_suggestion}
+                            for i in vr.issues[:20]
+                        ],
+                    }
+                
                 yield {
                     "type": "checkpoint",
                     "id": "post_codegen",
@@ -3113,6 +3320,7 @@ except Exception as e:
                         "runtime": runtime,
                         "entrypoint": entrypoint,
                         "full_artifacts": files,
+                        "validation": validation_data,
                     }
                 }
                 
@@ -3168,6 +3376,70 @@ except Exception as e:
                 else:
                     # Success!
                     record_success(repo_url, decisions=["Resurrection completed successfully"], patterns_used=[f"Runtime: {runtime}", f"Entrypoint: {entrypoint}"])
+                    
+                    # ═══════════════════════════════════════════════════
+                    # PHASE 2 (V3): Save enhanced context to memory
+                    # ═══════════════════════════════════════════════════
+                    try:
+                        if deep_scan_result:
+                            # Save dependency graph snapshot
+                            dep_graph = deep_scan_result.get("_dep_graph")
+                            if dep_graph:
+                                record_dependency_graph(repo_url, dep_graph)
+                            
+                            # Save project context extractions
+                            project_ctx = deep_scan_result.get("_project_context")
+                            if project_ctx:
+                                # API contracts
+                                if project_ctx.api_contracts:
+                                    contracts_data = [
+                                        {"method": c.method, "path": c.path, "handler": c.handler,
+                                         "file": c.file, "params": c.params, "response_type": c.response_type}
+                                        for c in project_ctx.api_contracts
+                                    ]
+                                    record_api_contracts(repo_url, contracts_data)
+                                
+                                # Schema registry
+                                if project_ctx.schemas:
+                                    schemas_data = [
+                                        {"name": s.name, "type": s.type, "fields": s.fields, "file": s.file}
+                                        for s in project_ctx.schemas
+                                    ]
+                                    record_schema_registry(repo_url, schemas_data)
+                                
+                                # Auth patterns
+                                if project_ctx.auth_patterns:
+                                    auth_data = [
+                                        {"type": a.type, "file": a.file, "strategy": a.strategy, "details": a.details}
+                                        for a in project_ctx.auth_patterns
+                                    ]
+                                    record_auth_patterns(repo_url, auth_data)
+                                
+                                # Env vars
+                                if project_ctx.env_vars_required:
+                                    record_env_vars(repo_url, project_ctx.env_vars_required)
+                                
+                                # Critical patterns (data flows as patterns)
+                                for flow in project_ctx.data_flows[:10]:  # Top 10
+                                    record_critical_pattern(repo_url, 
+                                        f"data_flow:{flow.source_file}->{flow.target_file}", 
+                                        {"type": flow.flow_type, "data": flow.data_description})
+                            
+                            # Save cross-batch context if available
+                            if hasattr(self, '_last_cross_batch_mgr') and self._last_cross_batch_mgr:
+                                mgr_data = self._last_cross_batch_mgr.to_memory_dict()
+                                record_cross_batch_context(repo_url, mgr_data)
+                                if self._last_cross_batch_mgr.breaking_changes:
+                                    bc_data = [
+                                        {"type": bc.kind, "description": bc.description, 
+                                         "severity": bc.severity, "batch": bc.batch_id}
+                                        for bc in self._last_cross_batch_mgr.breaking_changes
+                                    ]
+                                    record_breaking_changes(repo_url, bc_data)
+                                    
+                    except Exception as mem_err:
+                        print(f"[!] Phase 2 memory save warning (non-fatal): {mem_err}")
+                    
                     yield emit_log("✅ Verifying System Integrity... All checks passed!")
                     break
                     
