@@ -2,25 +2,57 @@
   "repo_url": "https://github.com/kirankishoreV-07/vsyk",
   "repo_id": "2a8928a45f19dacd",
   "created_at": "2026-02-09T10:03:53.656323",
-  "last_resurrection": "2026-02-09T13:43:38.191448",
-  "total_attempts": 3,
-  "successful_attempts": 0,
-  "failed_attempts": 0,
+  "last_resurrection": "2026-02-13T00:08:10.000448",
+  "total_attempts": 11,
+  "successful_attempts": 1,
+  "failed_attempts": 2,
   "tech_stack": {
     "detected_backend": "Express.js",
     "detected_frontend": "React",
     "detected_database": "MongoDB",
     "preferred_modernization": null
   },
-  "decisions": [],
-  "failures": [],
+  "decisions": [
+    {
+      "timestamp": "2026-02-13T00:24:59.575403",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    }
+  ],
+  "failures": [
+    {
+      "timestamp": "2026-02-12T23:26:40.458013",
+      "error_type": "EXCEPTION",
+      "error_message": "Invalid format specifier ' \"ok\", \"data\": [...]' for object of type 'str'",
+      "context": "Max retries exceeded",
+      "lesson_learned": "Review the error and adjust the approach accordingly."
+    },
+    {
+      "timestamp": "2026-02-12T23:54:59.534265",
+      "error_type": "EXCEPTION",
+      "error_message": "Invalid format specifier ' \"ok\", \"data\": [...]' for object of type 'str'",
+      "context": "Max retries exceeded",
+      "lesson_learned": "Review the error and adjust the approach accordingly."
+    }
+  ],
   "dependency_issues": [],
-  "successful_patterns": [],
+  "successful_patterns": [
+    "Runtime: python",
+    "Entrypoint: modernized_stack/backend/main.py"
+  ],
   "user_preferences": {
     "keep_original_paths": true,
     "preferred_css_framework": null,
     "preferred_frontend_framework": null,
     "avoid_frameworks": []
   },
-  "resurrection_history": []
+  "resurrection_history": [
+    {
+      "timestamp": "2026-02-13T00:24:59.575436",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    }
+  ]
 }

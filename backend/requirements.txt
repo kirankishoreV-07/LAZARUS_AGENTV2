@@ -4,3 +4,4 @@ google-generativeai
 e2b-code-interpreter
 python-dotenv
 requests
+aiohttp

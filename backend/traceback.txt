@@ -1,7 +1,0 @@
-Traceback (most recent call last):
-  File "C:\Users\arunn\lazarus-hackathon\backend\test_e2b_full.py", line 10, in <module>
-    with Sandbox() as sb:
-         ^^^^^^^^^
-  File "C:\Users\arunn\AppData\Local\Programs\Python\Python312\Lib\site-packages\e2b\sandbox_sync\main.py", line 86, in __init__
-    super().__init__(**opts)
-TypeError: SandboxBase.__init__() missing 5 required positional arguments: 'sandbox_id', 'envd_version', 'envd_access_token', 'sandbox_domain', and 'connection_config'

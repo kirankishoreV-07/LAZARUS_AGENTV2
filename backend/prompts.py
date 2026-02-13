@@ -238,7 +238,7 @@ SERVER FILE RULES (if this batch contains server files):
   * DO NOT serve static files (no app.static(), StaticFiles, send_file, etc.)
   * DO NOT return HTML responses (only JSON)
   * Frontend files (index.html, .css, .js) should be separate
-  * All API endpoints should return JSON: {"status": "ok", "data": [...]}
+  * All API endpoints should return JSON: {{"status": "ok", "data": [...]}}
 - **CORS CONFIGURATION**: Enable CORS for all origins
   * FastAPI: app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
   * Flask: CORS(app, resources={{r"/*": {{"origins": "*"}}}})

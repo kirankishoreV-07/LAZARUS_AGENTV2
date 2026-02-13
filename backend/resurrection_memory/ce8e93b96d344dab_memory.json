@@ -1,0 +1,43 @@
+{
+  "repo_url": "https://github.com/ArunN2005/demo-legacy-blog.git",
+  "repo_id": "ce8e93b96d344dab",
+  "created_at": "2026-02-10T11:39:37.072059",
+  "last_resurrection": "2026-02-10T11:39:48.163887",
+  "total_attempts": 2,
+  "successful_attempts": 1,
+  "failed_attempts": 0,
+  "tech_stack": {
+    "detected_backend": "Flask",
+    "detected_frontend": null,
+    "detected_database": null,
+    "preferred_modernization": null
+  },
+  "decisions": [
+    {
+      "timestamp": "2026-02-10T11:41:59.803892",
+      "decision": "Resurrection completed successfully",
+      "outcome": "success"
+    }
+  ],
+  "failures": [],
+  "dependency_issues": [],
+  "successful_patterns": [
+    "Runtime: python",
+    "Entrypoint: app.py"
+  ],
+  "user_preferences": {
+    "keep_original_paths": true,
+    "preferred_css_framework": null,
+    "preferred_frontend_framework": null,
+    "avoid_frameworks": []
+  },
+  "resurrection_history": [
+    {
+      "timestamp": "2026-02-10T11:41:59.803911",
+      "outcome": "success",
+      "decisions": [
+        "Resurrection completed successfully"
+      ]
+    }
+  ]
+}

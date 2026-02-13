@@ -19,6 +19,14 @@ from resurrection_memory import (
     get_memory_context_for_prompt, get_memory_summary
 )
 
+# ══ Phase 1 (V3) Imports: Async I/O, AST Parser, Dependency Graph ══
+from async_fetcher import fetch_files_parallel, should_fetch_file
+from ast_parser import analyze_all_files, analyze_file, FileAnalysis
+from dependency_graph import (
+    build_dependency_graph, create_smart_batches,
+    generate_batch_context, DependencyGraph, Batch
+)
+
 
 class GeminiAPIError(Exception):
     """Raised when all Gemini API models fail after retries."""
@@ -566,135 +574,103 @@ This PR contains the **completely modernized** version of your legacy codebase.
             blob_items = [item for item in tree if item['type'] == 'blob']
             print(f"[*] Repository tree: {total_items} items total, {len(blob_items)} files (blobs)")
             
-            # File extensions to fetch content for (COMPREHENSIVE)
-            code_extensions = {
-                # Languages
-                '.py', '.js', '.ts', '.tsx', '.jsx', '.mjs', '.cjs',
-                '.rb', '.go', '.rs', '.java', '.php', '.c', '.cpp', '.h', '.cs',
-                '.swift', '.kt', '.dart', '.lua', '.r', '.pl', '.sh', '.bat', '.ps1',
-                # Web
-                '.html', '.htm', '.css', '.scss', '.sass', '.less', '.styl',
-                '.vue', '.svelte', '.ejs', '.pug', '.hbs', '.handlebars', '.mustache',
-                '.astro', '.mdx',
-                # Config & Data
-                '.json', '.yaml', '.yml', '.toml', '.cfg', '.ini', '.xml',
-                '.env', '.env.example', '.env.local', '.env.development', '.env.production',
-                '.conf', '.properties', '.editorconfig',
-                # DB & API
-                '.sql', '.prisma', '.graphql', '.gql', '.proto',
-                # Docs & Text
-                '.md', '.txt', '.rst', '.csv',
-                # Build & Package
-                '.lock', '.npmrc', '.nvmrc', '.babelrc',
-                # Docker
-                '.dockerfile',
-                # SVG (used in components)
-                '.svg',
-            }
+            # ═══════════════════════════════════════════════════════════
+            # PHASE 1 (V3): ASYNC PARALLEL FILE FETCHING
+            # Uses aiohttp + asyncio.gather() for 10x faster scanning
+            # ═══════════════════════════════════════════════════════════
             
-            # Files to always fetch (by exact name)
-            important_files = {
-                'package.json', 'package-lock.json', 'yarn.lock', 'pnpm-lock.yaml',
-                'requirements.txt', 'Pipfile', 'Pipfile.lock', 'pyproject.toml', 'setup.py', 'setup.cfg',
-                'docker-compose.yml', 'docker-compose.yaml', 'Dockerfile',
-                '.env', '.env.example', '.env.local', '.env.development',
-                'config.py', 'settings.py', 'config.js', 'config.ts',
-                'schema.prisma', 'models.py', 'schemas.py', 'database.py',
-                'tsconfig.json', 'jsconfig.json', 'next.config.js', 'next.config.mjs', 'next.config.ts',
-                'vite.config.js', 'vite.config.ts', 'webpack.config.js',
-                'tailwind.config.js', 'tailwind.config.ts', 'postcss.config.js', 'postcss.config.mjs',
-                'eslint.config.js', 'eslint.config.mjs', '.eslintrc.js', '.eslintrc.json',
-                '.prettierrc', '.prettierrc.json', '.prettierrc.js',
-                'Makefile', 'Procfile', 'Gemfile', 'Gemfile.lock',
-                '.gitignore', '.dockerignore', 'vercel.json', 'netlify.toml',
-                'babel.config.js', 'jest.config.js', 'jest.config.ts',
-                'vitest.config.ts', 'playwright.config.ts',
-            }
+            print(f"[*] Deep scanning {len(tree)} files in repository (ASYNC PARALLEL MODE)...")
+            scan_start = time.time()
             
-            print(f"[*] Deep scanning {len(tree)} files in repository...")
-            files_fetched = 0
-            # NO LIMIT - Fetch ALL files! Gemini has a large context window.
-            
-            for item in tree:
-                if item['type'] != 'blob':
-                    continue
-                    
-                path = item['path']
-                _, ext = os.path.splitext(path)
-                filename = os.path.basename(path)
-                
-                # Check if we should fetch this file
-                should_fetch = (
-                    ext.lower() in code_extensions or
-                    filename in important_files or
-                    'model' in path.lower() or
-                    'schema' in path.lower() or
-                    'route' in path.lower() or
-                    'api' in path.lower() or
-                    'controller' in path.lower()
+            try:
+                # Async parallel fetch — 20 concurrent requests
+                fetched_pairs = fetch_files_parallel(
+                    owner, repo_name, tree, default_branch, self.github_token
                 )
                 
-                # Skip dependency/build directories using PATH COMPONENT matching
-                # (NOT substring - 'dist' must not match 'distribution')
-                skip_dirs = {'node_modules', 'venv', '.venv', '__pycache__', '.git', 
-                             'dist', 'build', '.next', '.nuxt', 'coverage', '.cache',
-                             'vendor', 'bower_components', '.tox', 'egg-info', '.eggs'}
-                path_parts = set(path.replace('\\', '/').split('/'))
-                if path_parts & skip_dirs:  # Set intersection - only matches exact directory names
-                    should_fetch = False
+                files_fetched = len(fetched_pairs)
+                scan_elapsed = time.time() - scan_start
+                print(f"[*] ⚡ Async fetch complete: {files_fetched} files in {scan_elapsed:.1f}s")
+                _add_debug_log('INFO', 'DEEP_SCAN', f'Async fetch: {files_fetched} files in {scan_elapsed:.1f}s', {
+                    'mode': 'async_parallel', 'concurrent_limit': 20
+                })
                 
-                # Skip binary/media files by extension
-                binary_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.ico', '.bmp', '.webp',
-                                     '.mp3', '.mp4', '.wav', '.avi', '.mkv', '.mov',
-                                     '.zip', '.tar', '.gz', '.rar', '.7z',
-                                     '.pdf', '.doc', '.docx', '.xls', '.xlsx',
-                                     '.woff', '.woff2', '.ttf', '.eot', '.otf',
-                                     '.pyc', '.pyo', '.so', '.dll', '.exe', '.o',
-                                     '.DS_Store', '.map'}
-                if ext.lower() in binary_extensions:
-                    should_fetch = False
-                
-                # Skip files larger than 500KB (from tree metadata)
-                file_size = item.get('size', 0)
-                if file_size > 500_000:
-                    print(f"  [⚠] Skipping large file ({file_size:,} bytes): {path}")
-                    should_fetch = False
-                
-                if should_fetch:
-                    content = self._fetch_file_content(
-                        owner, repo_name, path, default_branch, headers, item.get('sha')
-                    )
-                    
-                    if content is not None:
-                        lang = self._detect_language(path, content)
-                        
-                        result["files"].append({
-                            "path": path,
-                            "content": content,
-                            "language": lang
-                        })
-                        
-                        # Analyze this file for tech stack
-                        self._analyze_file_for_tech_stack(path, content, result)
-                        
-                        files_fetched += 1
-                        print(f"  [+] Fetched ({files_fetched}): {path}")
-                    
-                    # GitHub API rate limit protection: pause every 30 files
-                    if files_fetched > 0 and files_fetched % 30 == 0:
-                        print(f"  [⏳] Rate limit pause after {files_fetched} files...")
-                        time.sleep(1)
+            except Exception as async_err:
+                # Fallback to sequential fetching if async fails
+                print(f"[!] Async fetch failed ({async_err}), falling back to sequential...")
+                _add_debug_log('WARNING', 'DEEP_SCAN', f'Async fallback: {async_err}', {})
+                fetched_pairs = self._fetch_files_sequential(owner, repo_name, tree, default_branch, headers)
+                files_fetched = len(fetched_pairs)
             
-            print(f"[*] Deep scan complete: {files_fetched}/{len([i for i in tree if i['type']=='blob'])} files analyzed")
+            # Convert fetched pairs to result format
+            for path, content in fetched_pairs:
+                lang = self._detect_language(path, content)
+                result["files"].append({
+                    "path": path,
+                    "content": content,
+                    "language": lang
+                })
+                self._analyze_file_for_tech_stack(path, content, result)
             
-            # Warn if we got suspiciously few files
+            # ═══════════════════════════════════════════════════════════
+            # PHASE 1 (V3): AST ANALYSIS & DEPENDENCY GRAPH
+            # Runs AFTER fetching, builds structural intelligence
+            # ═══════════════════════════════════════════════════════════
+            
+            ast_start = time.time()
+            try:
+                # Run AST analysis on all fetched files
+                file_tuples = [(f["path"], f["content"]) for f in result["files"]]
+                analyses = analyze_all_files(file_tuples)
+                
+                # Build dependency graph
+                dep_graph = build_dependency_graph(analyses)
+                
+                ast_elapsed = time.time() - ast_start
+                print(f"[*] 🧠 AST analysis + dependency graph: {len(analyses)} files in {ast_elapsed:.1f}s")
+                print(f"    {dep_graph.summary()}")
+                _add_debug_log('INFO', 'AST_ANALYSIS', f'Analyzed {len(analyses)} files in {ast_elapsed:.1f}s', {
+                    'edges': len(dep_graph.edges),
+                    'circular_deps': len(dep_graph.circular_deps),
+                    'foundation_files': [n.path for n in dep_graph.nodes.values() if n.is_foundation]
+                })
+                
+                # Attach AST results and dep graph to result for downstream use
+                result["_ast_analyses"] = analyses
+                result["_dep_graph"] = dep_graph
+                
+                # Enrich tech stack from AST-detected frameworks
+                all_frameworks = set()
+                for analysis in analyses.values():
+                    all_frameworks.update(analysis.frameworks)
+                if all_frameworks:
+                    result["_detected_frameworks"] = list(all_frameworks)
+                    _add_debug_log('INFO', 'AST_ANALYSIS', f'Detected frameworks: {all_frameworks}', {})
+                
+                # Enrich API endpoints from AST-detected routes
+                for analysis in analyses.values():
+                    for route in analysis.routes:
+                        result["api_endpoints"].append(f"{route.method} {route.path} ({route.handler})")
+                
+                # Enrich schemas from AST
+                for analysis in analyses.values():
+                    result["database_schemas"].extend(analysis.schemas)
+                    
+            except Exception as ast_err:
+                print(f"[!] AST analysis failed (non-fatal): {ast_err}")
+                _add_debug_log('WARNING', 'AST_ANALYSIS', f'AST analysis failed: {ast_err}', {})
+                result["_ast_analyses"] = {}
+                result["_dep_graph"] = None
+            
             total_blobs = len([i for i in tree if i['type'] == 'blob'])
+            print(f"[*] Deep scan complete: {files_fetched}/{total_blobs} files analyzed")
+            
             if files_fetched == 0:
                 print(f"[!] WARNING: No files were fetched! Total blobs in tree: {total_blobs}")
                 _add_debug_log('ERROR', 'DEEP_SCAN', f'Zero files fetched from {total_blobs} blobs', {
                     'repo_url': repo_url, 'tree_count': total_blobs
                 })
-            elif files_fetched < total_blobs * 0.3:  # Less than 30% of files
+            elif files_fetched < total_blobs * 0.3:
                 print(f"[!] WARNING: Only fetched {files_fetched}/{total_blobs} files ({100*files_fetched//total_blobs}%)")
                 _add_debug_log('WARNING', 'DEEP_SCAN', f'Low file fetch rate: {files_fetched}/{total_blobs}', {})
             
@@ -804,6 +780,28 @@ This PR contains the **completely modernized** version of your legacy codebase.
             'owner': owner, 'repo': repo_name, 'branch': branch
         })
         return None
+
+    def _fetch_files_sequential(self, owner, repo_name, tree, branch, headers):
+        """
+        Fallback sequential file fetching (original V2 behavior).
+        Used when async fetcher fails.
+        """
+        results = []
+        for item in tree:
+            if item['type'] != 'blob':
+                continue
+            path = item['path']
+            size = item.get('size', 0)
+            if not should_fetch_file(path, size):
+                continue
+            content = self._fetch_file_content(
+                owner, repo_name, path, branch, headers, item.get('sha')
+            )
+            if content is not None:
+                results.append((path, content))
+                if len(results) % 30 == 0:
+                    time.sleep(1)  # Rate limit protection
+        return results
 
     def _detect_language(self, path: str, content: str) -> str:
         """Detect programming language from file path and content."""
@@ -1264,6 +1262,50 @@ This PR contains the **completely modernized** version of your legacy codebase.
                 must_preserve=must_preserve,
                 can_modernize=can_modernize,
             )
+            
+            # V3: Inject structural intelligence from AST + dependency graph
+            ast_analyses = deep_scan_result.get("_ast_analyses", {})
+            dep_graph = deep_scan_result.get("_dep_graph", None)
+            detected_frameworks = deep_scan_result.get("_detected_frameworks", [])
+            db_schemas = deep_scan_result.get("database_schemas", [])
+            
+            if dep_graph or detected_frameworks or db_schemas:
+                v3_context_parts = ["\n\n=== STRUCTURAL ANALYSIS (V3 AST Intelligence) ==="]
+                
+                if detected_frameworks:
+                    v3_context_parts.append(f"Detected Frameworks: {', '.join(detected_frameworks)}")
+                
+                if db_schemas:
+                    v3_context_parts.append(f"Database Schemas/Models: {', '.join(db_schemas[:20])}")
+                
+                if dep_graph:
+                    v3_context_parts.append(f"\nDependency Analysis:")
+                    v3_context_parts.append(f"  - Total edges: {len(dep_graph.edges)}")
+                    foundation = [n.path for n in dep_graph.nodes.values() if n.is_foundation]
+                    if foundation:
+                        v3_context_parts.append(f"  - Foundation files (core utilities): {', '.join(foundation[:10])}")
+                    if dep_graph.circular_deps:
+                        v3_context_parts.append(f"  - ⚠ Circular dependencies: {len(dep_graph.circular_deps)} groups")
+                        for cycle in dep_graph.circular_deps[:3]:
+                            v3_context_parts.append(f"    - {' ↔ '.join(cycle[:5])}")
+                
+                # Add key file summaries
+                if ast_analyses:
+                    v3_context_parts.append(f"\nKey File Summaries:")
+                    # Show foundation files + files with routes + files with schemas
+                    important_analyses = sorted(
+                        ast_analyses.values(),
+                        key=lambda a: len(a.routes) * 3 + len(a.schemas) * 2 + len(a.exports),
+                        reverse=True
+                    )[:20]
+                    for a in important_analyses:
+                        s = a.summary()
+                        if s and '(no significant symbols)' not in s:
+                            v3_context_parts.append(f"  - {a.path}: {s}")
+                
+                v3_context_parts.append("=== END STRUCTURAL ANALYSIS ===\n")
+                prompt = prompt + '\n'.join(v3_context_parts)
+                print(f"[PLAN] Injected V3 structural context ({len(detected_frameworks)} frameworks, {len(db_schemas)} schemas)")
         else:
             # Fallback: minimal prompt if no deep scan
             total_chars = 0
@@ -1504,27 +1546,94 @@ Group the files into batches for processing."""
 
         return entrypoint, runtime
 
-    def _group_files_into_batches(self, files: list, plan: str = "", max_chars_per_batch: int = None) -> list:
+    def _group_files_into_batches(self, files: list, plan: str = "", max_chars_per_batch: int = None, dep_graph: DependencyGraph = None, ast_analyses: dict = None) -> list:
         """
         Groups files into logical batches for multi-call processing.
         
-        Strategy:
-        1. Try to parse batch groupings from the AI-generated plan
-        2. If plan parsing fails, fall back to directory-based grouping
-        3. Enforce max chars per batch to stay within token limits
+        Strategy (V3 Priority Order):
+        1. Smart batching via dependency graph (if available from Phase 1)
+        2. Parse batch groupings from the AI-generated plan
+        3. Fall back to directory-based grouping
+        4. Enforce max chars per batch to stay within token limits
         
         Args:
             files: List of dicts with 'path', 'content', 'language'
             plan: The modernization plan (may contain BATCH groupings)
             max_chars_per_batch: Max total source chars per batch (auto-calculated from model if None)
+            dep_graph: V3 dependency graph (from scan_repository_deep)
+            ast_analyses: V3 AST analyses dict (from scan_repository_deep)
             
         Returns:
-            List of batch dicts: [{"name": str, "files": [file_dicts]}]
+            List of batch dicts: [{"name": str, "files": [file_dicts], "context": str (optional)}]
         """
         # Dynamically calculate batch size based on coder model's context window
         if max_chars_per_batch is None:
             max_chars_per_batch = self.get_model_max_chars(self.coder_model)
             print(f"[BATCH] Dynamic batch limit: {max_chars_per_batch:,} chars (model: {self.coder_model})")
+        
+        # ═══════════════════════════════════════════════════════════
+        # V3 ATTEMPT 0: Smart Dependency-Aware Batching
+        # ═══════════════════════════════════════════════════════════
+        if dep_graph and ast_analyses and len(dep_graph.nodes) > 0:
+            try:
+                print(f"[BATCH] ⚡ Using V3 Smart Batching (dependency graph: {len(dep_graph.nodes)} nodes, {len(dep_graph.edges)} edges)")
+                _add_debug_log('INFO', 'BATCH', 'Using V3 smart dependency-aware batching', {
+                    'nodes': len(dep_graph.nodes), 'edges': len(dep_graph.edges)
+                })
+                
+                # Calculate max lines per batch from char limit (~80 chars per line)
+                max_lines = max_chars_per_batch // 80
+                
+                smart_batches = create_smart_batches(
+                    dep_graph, ast_analyses,
+                    max_batch_size=15,
+                    max_batch_lines=max_lines,
+                    context_limit=max_chars_per_batch // 3,  # 1/3 of budget for context
+                )
+                
+                if smart_batches:
+                    # Convert Batch objects to the legacy dict format expected by generate_code_batched
+                    path_to_file = {f["path"]: f for f in files}
+                    result_batches = []
+                    total_assigned = 0
+                    
+                    for batch in smart_batches:
+                        batch_files = []
+                        for path in batch.files:
+                            if path in path_to_file:
+                                batch_files.append(path_to_file[path])
+                        
+                        if batch_files:
+                            # Generate rich context for this batch
+                            batch_context = generate_batch_context(batch, ast_analyses)
+                            result_batches.append({
+                                "name": batch.description or f"Batch {batch.id}",
+                                "files": batch_files,
+                                "_smart_context": batch_context,   # V3: Rich structural context
+                                "_context_files": batch.context_files,  # V3: Cross-batch deps
+                                "_foundation_files": batch.foundation_files,
+                            })
+                            total_assigned += len(batch_files)
+                    
+                    # Check for unassigned files
+                    assigned_paths = set()
+                    for b in result_batches:
+                        for f in b["files"]:
+                            assigned_paths.add(f["path"])
+                    
+                    missing = [f for f in files if f["path"] not in assigned_paths]
+                    if missing:
+                        print(f"[BATCH] Smart batching missed {len(missing)} files, adding remainder batch")
+                        result_batches.append({"name": "Remaining Files", "files": missing})
+                    
+                    print(f"[BATCH] ✅ V3 Smart Batching: {len(result_batches)} batches, {total_assigned + len(missing)} files")
+                    split = self._split_oversized_batches(result_batches, max_chars_per_batch)
+                    return self._merge_small_batches(split, max_chars_per_batch)
+                    
+            except Exception as e:
+                print(f"[BATCH] Smart batching failed ({e}), falling back to plan/directory batching")
+                _add_debug_log('WARNING', 'BATCH', f'Smart batching fallback: {e}', {})
+        
         # ── Attempt 1: Parse batch groups from plan ──
         batches_from_plan = self._parse_batches_from_plan(plan, files)
         if batches_from_plan:
@@ -1538,19 +1647,22 @@ Group the files into batches for processing."""
             missing = all_paths - assigned_paths
             
             if not missing:
-                # All files assigned - enforce size limits
-                return self._split_oversized_batches(batches_from_plan, max_chars_per_batch)
+                # All files assigned - enforce size limits, then merge small batches
+                split = self._split_oversized_batches(batches_from_plan, max_chars_per_batch)
+                return self._merge_small_batches(split, max_chars_per_batch)
             else:
                 print(f"[BATCH] Plan missed {len(missing)} files, adding to extra batch")
                 _add_debug_log('WARNING', 'BATCH', f'Plan missed {len(missing)} files', {'missing': list(missing)[:10]})
                 missing_files = [f for f in files if f["path"] in missing]
                 batches_from_plan.append({"name": "Remaining Files", "files": missing_files})
-                return self._split_oversized_batches(batches_from_plan, max_chars_per_batch)
+                split = self._split_oversized_batches(batches_from_plan, max_chars_per_batch)
+                return self._merge_small_batches(split, max_chars_per_batch)
 
         # ── Attempt 2: Directory-based grouping ──
         print("[BATCH] Using directory-based grouping (plan parsing failed)")
         _add_debug_log('INFO', 'BATCH', 'Using directory-based grouping fallback', {})
-        return self._group_by_directory(files, max_chars_per_batch)
+        dir_batches = self._group_by_directory(files, max_chars_per_batch)
+        return self._merge_small_batches(dir_batches, max_chars_per_batch)
 
     def _parse_batches_from_plan(self, plan: str, files: list) -> list:
         """
@@ -1648,6 +1760,116 @@ Group the files into batches for processing."""
         
         return self._split_oversized_batches(batches, max_chars_per_batch)
 
+    def _merge_small_batches(self, batches: list, max_chars_per_batch: int) -> list:
+        """
+        Merge tiny batches (1-2 files) into larger ones to minimize API calls.
+        Groups by file type similarity, respects max_chars_per_batch limit.
+        Target: 5-12 files per batch.
+        """
+        if not batches or len(batches) <= 1:
+            return batches
+        
+        MIN_FILES_PER_BATCH = 3
+        MAX_FILES_PER_BATCH = 12
+        
+        large_batches = []   # Already big enough
+        small_batches = []   # Need merging
+        
+        for batch in batches:
+            if len(batch["files"]) >= MIN_FILES_PER_BATCH:
+                large_batches.append(batch)
+            else:
+                small_batches.append(batch)
+        
+        if not small_batches:
+            return batches
+        
+        # Categorize small batches by file type for smarter merging
+        def get_category(batch):
+            """Return a category key for grouping similar batches."""
+            if not batch["files"]:
+                return "other"
+            extensions = set()
+            for f in batch["files"]:
+                ext = f.get("path", "").rsplit(".", 1)[-1].lower() if "." in f.get("path", "") else "unknown"
+                extensions.add(ext)
+            # Categorize by type family
+            if extensions & {"sql"}:
+                return "sql"
+            elif extensions & {"tsx", "jsx"}:
+                return "components"
+            elif extensions & {"ts", "js"} and not extensions & {"tsx", "jsx"}:
+                return "scripts"
+            elif extensions & {"css", "scss", "less"}:
+                return "styles"
+            elif extensions & {"json", "yaml", "yml", "toml", "lock"}:
+                return "config"
+            elif extensions & {"html", "htm"}:
+                return "html"
+            elif extensions & {"sh", "bash", "ps1"}:
+                return "scripts"
+            else:
+                return "other"
+        
+        # Group small batches by category
+        category_groups = {}
+        for batch in small_batches:
+            cat = get_category(batch)
+            if cat not in category_groups:
+                category_groups[cat] = []
+            category_groups[cat].append(batch)
+        
+        # Merge within each category
+        for cat, cat_batches in category_groups.items():
+            current_files = []
+            current_chars = 0
+            current_names = []
+            
+            for batch in cat_batches:
+                batch_chars = sum(len(f.get("content", "")) for f in batch["files"])
+                
+                # Check if adding this batch would exceed limits
+                would_exceed_chars = current_chars + batch_chars > max_chars_per_batch
+                would_exceed_files = len(current_files) + len(batch["files"]) > MAX_FILES_PER_BATCH
+                
+                if (would_exceed_chars or would_exceed_files) and current_files:
+                    # Flush current merged batch
+                    merged_name = ", ".join(current_names[:3])
+                    if len(current_names) > 3:
+                        merged_name += f" +{len(current_names) - 3} more"
+                    large_batches.append({
+                        "name": merged_name,
+                        "files": current_files,
+                    })
+                    current_files = []
+                    current_chars = 0
+                    current_names = []
+                
+                current_files.extend(batch["files"])
+                current_chars += batch_chars
+                current_names.append(batch["name"])
+            
+            # Flush remaining
+            if current_files:
+                merged_name = ", ".join(current_names[:3])
+                if len(current_names) > 3:
+                    merged_name += f" +{len(current_names) - 3} more"
+                large_batches.append({
+                    "name": merged_name,
+                    "files": current_files,
+                })
+        
+        before_count = len(batches)
+        after_count = len(large_batches)
+        if before_count != after_count:
+            print(f"[BATCH] 🔀 Merged {before_count} batches → {after_count} batches (consolidated {before_count - after_count} small batches)")
+            _add_debug_log('INFO', 'BATCH', f'Merged {before_count} → {after_count} batches', {
+                'before': before_count, 'after': after_count,
+                'merged_names': [b['name'] for b in large_batches]
+            })
+        
+        return large_batches
+
     def _split_oversized_batches(self, batches: list, max_chars: int) -> list:
         """
         Splits any batch that exceeds max_chars into smaller sub-batches.
@@ -1721,8 +1943,12 @@ Group the files into batches for processing."""
         if repo_url:
             memory_context = get_memory_context_for_prompt(repo_url)
         
-        # Group files into batches
-        batches = self._group_files_into_batches(files, plan)
+        # V3: Extract AST analyses and dependency graph from deep scan result
+        ast_analyses = deep_scan_result.get("_ast_analyses", {})
+        dep_graph = deep_scan_result.get("_dep_graph", None)
+        
+        # Group files into batches (V3: uses dependency graph when available)
+        batches = self._group_files_into_batches(files, plan, dep_graph=dep_graph, ast_analyses=ast_analyses)
         
         print(f"\n{'='*70}")
         print(f"[BATCH] MULTI-BATCH CODE GENERATION")
@@ -1770,6 +1996,19 @@ Group the files into batches for processing."""
                 memory_context=memory_context if batch_idx == 0 else "",  # Memory only for first batch
             )
             
+            # V3: Inject smart structural context from dependency graph
+            smart_context = batch.get("_smart_context", "")
+            if smart_context:
+                context_injection = (
+                    "\n\n=== V3 STRUCTURAL INTELLIGENCE (from AST + Dependency Graph) ===\n"
+                    "Use this to understand how files in this batch connect to the rest of the project:\n"
+                    f"{smart_context}\n"
+                    "=== END STRUCTURAL INTELLIGENCE ===\n"
+                )
+                # Insert before the file contents section
+                prompt = prompt + context_injection
+                print(f"[BATCH {batch_idx+1}] Injected {len(smart_context):,} chars of V3 structural context")
+            
             # Call Gemini for this batch
             print(f"[BATCH {batch_idx+1}] Prompt size: {len(prompt):,} chars")
             _add_debug_log('DEBUG', 'BATCH', f'Batch {batch_idx+1} prompt size: {len(prompt):,} chars', {})
@@ -1811,9 +2050,9 @@ Group the files into batches for processing."""
                 previously_generated_summaries += f"\n\n=== Batch {batch_idx+1}: {batch_name} ===\n{batch_summary}"
             
             # Rate limit protection: wait between batches
-            # Gemini 3 Flash = 1K RPM, so 3s is plenty of headroom
+            # Gemini 3 Flash = 2K RPM → 1s is safe. Use 2s every 5th batch for burst safety.
             if batch_idx < len(batches) - 1:
-                wait_time = 3
+                wait_time = 2 if (batch_idx + 1) % 5 == 0 else 1
                 print(f"[BATCH] ⏳ Waiting {wait_time}s before next batch (rate limit protection)...")
                 _add_debug_log('INFO', 'BATCH', f'Rate limit cooldown: {wait_time}s', {})
                 if progress_callback:
@@ -1865,7 +2104,7 @@ Group the files into batches for processing."""
                     memory_context="",
                 )
                 
-                time.sleep(3)  # Rate limit pause
+                time.sleep(1)  # Rate limit pause
                 try:
                     recovery_response = self._call_gemini(recovery_prompt, model=self.coder_model)
                 except GeminiAPIError:
@@ -2955,7 +3194,13 @@ except Exception as e:
                     break
                     
             except Exception as loop_error:
+                # Always stringify error_str to avoid format specifier errors
                 error_str = str(loop_error)
+                if not isinstance(error_str, str):
+                    try:
+                        error_str = json.dumps(error_str)
+                    except Exception:
+                        error_str = repr(error_str)
                 all_errors.append({
                     "attempt": retry_count + 1,
                     "type": "EXCEPTION",
